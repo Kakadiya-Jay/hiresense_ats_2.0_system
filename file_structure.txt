@@ -1,0 +1,79 @@
+hiresense/
+├─ README.md
+├─ requirements.txt
+├─ .gitignore
+│
+├─ config/                              # static config files
+│  ├─ hiresense_skills_dictionary_v2.json
+│  ├─ important_technical_words.json
+│  ├─ project_triggers.json
+│  ├─ profile_config.json
+│  ├─ feature_strength_rules.json
+│  └─ reference_extractor_config.json
+│
+├─ data/                                # demo/test data
+│  ├─ raw_resumes/
+│  ├─ jds/
+│  └─ labeled/
+│
+├─ src/
+│  ├─ api/                              # FastAPI backend
+│  │  ├─ main.py                        # FastAPI app (entrypoint uvicorn)
+│  │  ├─ routes/
+│  │  │  ├─ health.py
+│  │  │  ├─ resume.py                   # /process_resume, /process_batch
+│  │  │  └─ candidate.py                # candidate lookup if stored
+│  │  └─ services/                      # wrappers for calling pipeline
+│  │     └─ resume_service.py
+│  │
+│  ├─ pipeline/                         # orchestrator & shared core
+│  │  ├─ pipeline.py                    # run_pipeline_for_pdf / batch
+│  │  ├─ types.py                       # dataclasses (LinkEntry, CandidateMeta)
+│  │  ├─ config_loader.py
+│  │  └─ security.py                    # pseudonymization, encryption helpers
+│  │
+│  ├─ phases/                           # each phase isolated
+│  │  ├─ text_extraction/
+│  │  │  ├─ main.py
+│  │  │  └─ helpers/
+│  │  │     ├─ extractor.py
+│  │  │     ├─ ocr_utils.py
+│  │  │     └─ link_utils.py
+│  │  ├─ sectioning/
+│  │  │  ├─ main.py
+│  │  │  └─ helpers/
+│  │  ├─ feature_extraction/
+│  │  │  ├─ main.py
+│  │  │  └─ helpers/
+│  │  ├─ embeddings_matching/
+│  │  │  ├─ main.py
+│  │  │  └─ helpers/
+│  │  └─ scoring/
+│  │     ├─ main.py
+│  │     └─ helpers/
+│  │
+│  ├─ ui/                               # frontend
+│  │  ├─ streamlit_app.py
+│  │  └─ components.py
+│  │
+│  └─ utils/                            # common small helpers
+│     ├─ text_utils.py
+│     ├─ pii_utils.py
+│     └─ logging_config.py
+│
+├─ tests/                               # all tests (unit + integration)
+│  ├─ unit/
+│  │  ├─ test_extractor.py
+│  │  ├─ test_link_utils.py
+│  │  └─ ...
+│  └─ integration/
+│     └─ test_pipeline_end_to_end.py
+│
+├─ examples/                            # sample PDFs + expected outputs
+│  └─ sample_resume_demo.pdf
+│
+└─ docs/
+   ├─ architecture_diagram.png
+   ├─ api_docs.md
+   ├─ phases_overview.md
+   └─ presentation_slides/

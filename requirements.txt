@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+streamlit
+python-multipart
+pytesseract
+PyMuPDF
+sentence-transformers
+phonenumbers
+REQ
