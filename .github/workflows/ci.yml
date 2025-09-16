@@ -12,7 +12,8 @@ jobs:
       - name: Install deps
         run: |
           python -m venv .hirevenv
-          source .hirevenv/bin/activate
+          source .hirevenv/Scripts/activate
           pip install -r requirements.txt
+          Deactivate
       - name: Run tests
         run: pytest -q
