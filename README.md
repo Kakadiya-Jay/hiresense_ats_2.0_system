@@ -1,2 +1,2 @@
 # Hiresense Ecosystem
-source .venv/bin/activate
+source .hirevenv/bin/activate
