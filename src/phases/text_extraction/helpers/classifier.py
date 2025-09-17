@@ -14,7 +14,19 @@ from .link_utils import dedupe_links, normalize_url
 
 CERT_DOMAINS = {"codebasics.io", "coursera.org", "udemy.com", "edx.org", "nptel.ac.in"}
 
-DOI_RE = re.compile(r"10\.\d{4,9}/\S+", flags=re.IGNORECASE)
+DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\)\]\,;]+", flags=re.I)
+ARXIV_ID_RE = re.compile(r"([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?)", flags=re.I)
+
+PUBLISHER_DOMAINS = [
+    "ieeexplore.ieee.org",
+    "dl.acm.org",
+    "springer.com",
+    "nature.com",
+    "sciencedirect.com",
+    "researchgate.net",
+    "pubmed.ncbi.nlm.nih.gov",
+    "ssrn.com",
+]
 
 
 def classify_link(entry: Dict) -> Dict:
@@ -25,7 +37,11 @@ def classify_link(entry: Dict) -> Dict:
     norm = entry.get("normalized_url", "") or ""
     anchor = (entry.get("anchor_text") or "").lower()
     try:
-        domain = urllib.parse.urlparse(norm).netloc.lower()
+        domain = (
+            urllib.parse.urlparse(norm).netloc.lower()
+            if norm.startswith("http")
+            else ""
+        )
     except Exception:
         domain = ""
     out = dict(entry)
@@ -34,6 +50,79 @@ def classify_link(entry: Dict) -> Dict:
     out["meta"] = {}
     out["confidence"] = 0.5
 
+    # ---- Research / paper detection ----
+    # 1) arXiv direct (high confidence)
+    if "arxiv.org" in norm:
+        # extract id
+        m = re.search(
+            r"/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?)", norm, flags=re.I
+        )
+        if m:
+            arxiv_id = m.group(1)
+            out["type"] = "research_paper"
+            out["meta"] = {"source": "arxiv", "id": arxiv_id}
+            out["confidence"] = 0.95
+            return out
+        # if no id found, still tag as research candidate
+        out["type"] = "research_paper"
+        out["meta"] = {"source": "arxiv", "id": None}
+        out["confidence"] = 0.85
+        return out
+
+    # 2) DOI normalized "doi:" or doi.org links
+    if norm.startswith("doi:") or "doi.org" in norm:
+        # extract doi id portion
+        doi = None
+        if norm.startswith("doi:"):
+            doi = norm.split(":", 1)[1]
+        else:
+            try:
+                doi = urllib.parse.urlparse(norm).path.lstrip("/")
+            except Exception:
+                doi = None
+        out["type"] = "research_paper"
+        out["meta"] = {"source": "doi", "id": doi}
+        out["confidence"] = 0.95
+        return out
+
+    # 3) Publisher domains (ACM, IEEE, Springer...) -> paper-like
+    for pub in PUBLISHER_DOMAINS:
+        if pub in norm:
+            out["type"] = "research_paper"
+            out["meta"] = {"source": pub.split(".")[0], "id": None}
+            out["confidence"] = 0.90
+            return out
+
+    # 4) PDF file heuristics: url ends with .pdf (medium confidence)
+    if norm.lower().endswith(".pdf"):
+        # increase confidence if anchor or surrounding anchor indicates 'paper' or 'publication'
+        if re.search(
+            r"\b(paper|preprint|pdf|publication|accepted|conference|journal)\b",
+            anchor,
+            flags=re.I,
+        ):
+            out["type"] = "research_paper"
+            out["meta"] = {"source": "pdf", "id": None}
+            out["confidence"] = 0.85
+            return out
+        # otherwise mark as file, but still possibly research if in publications later
+        out["type"] = "file"
+        out["meta"] = {"source": "pdf", "id": None}
+        out["confidence"] = 0.6
+        return out
+
+    # 5) Anchor heuristics: anchor text mentions pdf/doi/arxiv/paper/publication
+    if re.search(
+        r"\b(arxiv|doi|paper|pdf|preprint|publication|accepted|conference|journal)\b",
+        anchor,
+        flags=re.I,
+    ):
+        out["type"] = "research_paper"
+        out["meta"] = {"source": "anchor_hint", "id": None}
+        out["confidence"] = 0.75
+        return out
+
+    # ---- Existing heuristics for code repos / linkedin / certificates ----
     # github
     if "github.com" in domain:
         path = urllib.parse.urlparse(norm).path.strip("/")
@@ -43,7 +132,7 @@ def classify_link(entry: Dict) -> Dict:
             out["meta"] = {"user": segs[0].lower(), "repo": segs[1].lower()}
             out["confidence"] = 0.98
             return out
-        if len(segs) == 1 and segs[0]:
+        elif len(segs) == 1 and segs[0]:
             out["type"] = "github_profile"
             out["meta"] = {"user": segs[0].lower()}
             out["confidence"] = 0.95
@@ -66,13 +155,7 @@ def classify_link(entry: Dict) -> Dict:
         out["confidence"] = 0.9
         return out
 
-    # research
-    if "arxiv.org" in domain or DOI_RE.search(norm) or DOI_RE.search(anchor):
-        out["type"] = "research_paper"
-        out["confidence"] = 0.95
-        return out
-
-    # anchor heuristics
+    # anchor heuristics for other types
     if re.search(r"\b(repo|repository|source|github)\b", anchor):
         out["type"] = "github_repo"
         out["confidence"] = 0.7
@@ -120,10 +203,9 @@ def update_extract_and_clean(meta: Dict) -> Dict:
 
     # prepare normalized, deduped entries (add normalized_url field)
     deduped = dedupe_links(raw_links)
+    # ensure each has normalized_url (dedupe already provided)
     for e in deduped:
-        e["normalized_url"] = e.get("normalized_url") or e.get(
-            "normalized_url"
-        )  # already present from dedupe
+        e["normalized_url"] = e.get("normalized_url") or e.get("normalized_url")
     # classify
     classified = [classify_link(e) for e in deduped]
     # build metadata schema
@@ -140,7 +222,6 @@ def update_extract_and_clean(meta: Dict) -> Dict:
             "confidence": float(c.get("confidence", 0.5)),
         }
         link_metadata.append(item)
-    # inject urls into text
     cleaned_updated = inject_links_into_text(text, link_metadata)
     m["cleaned_text_updated"] = cleaned_updated
     m["link_metadata"] = link_metadata
