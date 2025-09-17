@@ -95,13 +95,13 @@ def extract_text_and_meta(pdf_path: str) -> Dict:
     )
     phones = list({p for p in raw_phones if len(re.sub(r"\D", "", p)) >= 7})
 
-    cleaned_text = full_text  # injection and label-cleaning will be applied in link classifier phase
+     # injection and label-cleaning will be applied in link classifier phase
 
     return {
-        "full_text": full_text,
+        "full_text": full_text, # preserve exact casing here
         "pages": pages_text,
         "links": raw_links,
         "emails": emails,
         "phones": phones,
-        "cleaned_text": cleaned_text,
+        "cleaned_text": full_text.lower(), # uniform lowercased for cleaned_text
     }
