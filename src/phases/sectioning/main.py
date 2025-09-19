@@ -1,220 +1,162 @@
 # src/phases/sectioning/main.py
 """
-Public API for Phase 2 sectioning.
+Sectioning module (rule-based baseline).
 
-Functions:
-- sectionize(meta) -> list of section dicts
-- build_candidate_skeleton(sections, meta) -> candidate JSON skeleton (now includes research_papers stubs)
+Primary function:
+    run_sectioning_on_text(cleaned_text: str) -> dict
+
+Behavior:
+- Uses conservative header detection heuristics:
+    - Known header keywords (education, experience, skills, projects, certifications, achievements, summary, languages)
+    - Lines in ALL CAPS (short)
+    - Lines ending with ':' or starting with header keywords
+- Splits cleaned_text into sections and returns:
+    - raw_sections: dict of canonical_section_name -> text_block
+    - section_confidence: dict of canonical_section_name -> float [0..1]
+- This is a rule-based baseline; replace with a model-based sectioner later for improved recall.
 """
 
-from typing import Dict, List
-import uuid
+import re
+from typing import Dict, Any, Tuple, List
 
-from .helpers.segmenter import (
-    split_into_lines_with_page,
-    detect_headings,
-    build_sections_from_headings,
-)
+# canonical section header keywords (lowercase)
+SECTION_HEADERS = [
+    "summary",
+    "objective",
+    "skills",
+    "technical skills",
+    "education",
+    "experience",
+    "work experience",
+    "projects",
+    "certifications",
+    "achievements",
+    "awards",
+    "publications",
+    "open source",
+    "languages",
+    "competitions",
+    "hobbies",
+    "personal_info",
+    "contact",
+    "internship",
+    "skills & technologies",
+]
+
+# Map alias to canonical simple key
+CANONICAL_ALIAS_MAP = {
+    "technical skills": "skills",
+    "skillset": "skills",
+    "work experience": "experience",
+    "projects": "projects",
+    "personal_info": "personal_info",
+    "contact": "personal_info",
+}
+
+HEADER_LINE_RE = re.compile(r"^[\s\-•\u2022]*([A-Za-z0-9 &\-]{2,60}):?\s*$")
+# This will match typical lines that look like "EDUCATION", "Projects:", "Skills -"
 
 
-def sectionize(meta: Dict) -> List[Dict]:
+def _normalize_header_key(s: str) -> str:
+    k = s.strip().lower()
+    k = re.sub(r"[^a-z0-9\s]", " ", k)
+    k = re.sub(r"\s+", " ", k).strip()
+    if k in CANONICAL_ALIAS_MAP:
+        return CANONICAL_ALIAS_MAP[k]
+    if k in SECTION_HEADERS:
+        # map to shorter canonical key by removing spaces
+        return k.replace(" ", "_")
+    # fallback to simplified key
+    return k.replace(" ", "_")
+
+
+def _is_header_line(line: str) -> Tuple[bool, str]:
     """
-    meta: result from Phase 1 (must contain 'pages' list and optionally 'cleaned_text'/'full_text').
-    Returns sections list (see helper docs).
+    Detect if line is a header. Returns (is_header, header_key)
     """
-    pages = meta.get("pages", [])
-    if not pages:
-        # fallback: if only cleaned_text provided, treat as single page
-        txt = meta.get("cleaned_text") or meta.get("full_text") or ""
-        pages = [txt]
-    lines = split_into_lines_with_page(pages)
-    headings = detect_headings(lines, threshold=0.45)  # threshold can be tuned
-    sections = build_sections_from_headings(lines, headings)
-    return sections
+    if not line or len(line) < 2:
+        return False, ""
+    stripped = line.strip()
+    # if it's ALL CAPS and short, treat as header
+    words = stripped.split()
+    if stripped.isupper() and len(words) <= 5 and len(stripped) < 60:
+        return True, _normalize_header_key(stripped)
+    # if line matches header regex and contains a known header keyword
+    m = HEADER_LINE_RE.match(stripped)
+    if m:
+        candidate = m.group(1)
+        cand_low = candidate.lower()
+        for h in SECTION_HEADERS:
+            if h in cand_low:
+                return True, _normalize_header_key(h)
+        # if it looks like a header even if not in SECTION_HEADERS, return it
+        return True, _normalize_header_key(candidate)
+    # also if line starts with known header word
+    ln_low = stripped.lower()
+    for h in SECTION_HEADERS:
+        if ln_low.startswith(h):
+            return True, _normalize_header_key(h)
+    return False, ""
 
 
-def _map_links_to_sections(
-    link_metadata: List[Dict], sections: List[Dict]
-) -> List[Dict]:
+def split_into_sections_by_headers(text: str) -> Dict[str, str]:
     """
-    For each link metadata entry, attempt to attach 'evidence' pointing to section_id and page.
-    If page is available, use page to map to section whose start_page <= page <= end_page.
-    Otherwise attempt to match by searching normalized_url text in section text (best-effort).
+    Walk through lines, break when a header is seen, collect blocks.
     """
-    # build page -> section_id lookup ranges
-    page_map = {}
-    for sec in sections:
-        sp = sec.get("start_page", 0)
-        ep = sec.get("end_page", sp)
-        for p in range(sp, ep + 1):
-            page_map.setdefault(p, []).append(sec["section_id"])
+    lines = text.splitlines()
+    sections = {}
+    current_key = "preamble"
+    sections[current_key] = []
+    for ln in lines:
+        is_hdr, hdr_key = _is_header_line(ln)
+        if is_hdr:
+            current_key = hdr_key or hdr_key or "misc"
+            sections.setdefault(current_key, [])
+            continue
+        sections.setdefault(current_key, []).append(ln)
+    # join blocks
+    out = {}
+    for k, block_lines in sections.items():
+        # join non-empty lines
+        filtered = [l for l in block_lines if l and l.strip()]
+        out[k] = "\n".join(filtered).strip()
+    return out
 
-    enriched = []
-    for lm in link_metadata:
-        entry = dict(lm)
-        evidence = {
-            "section_id": None,
-            "page": entry.get("page"),
-            "anchor_text": entry.get("anchor_text"),
-        }
-        page = entry.get("page")
-        if page is not None and page in page_map:
-            # pick first matching section id (document order)
-            evidence["section_id"] = page_map[page][0]
+
+def run_sectioning_on_text(cleaned_text: str) -> Dict[str, Any]:
+    """
+    Public facade for sectioning.
+    Returns dict: {"raw_sections": {...}, "section_confidence": {...}}
+    Confidence is heuristic: 0.9 if header detected, 0.6 if inferred, else 0.2
+    """
+    if not cleaned_text:
+        return {"raw_sections": {}, "section_confidence": {}}
+
+    # naive split by double newline paragraphs first to improve header isolation
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", cleaned_text) if p.strip()]
+    # Rebuild a text that preserves paragraph boundaries
+    text_for_scan = "\n\n".join(paragraphs)
+
+    raw_sections = split_into_sections_by_headers(text_for_scan)
+
+    # assign simple confidences: header presence => high
+    section_confidence = {}
+    for k, v in raw_sections.items():
+        conf = 0.2
+        if k in (
+            "skills",
+            "education",
+            "experience",
+            "projects",
+            "certifications",
+            "summary",
+            "languages",
+            "achievements",
+        ):
+            conf = 0.9 if v else 0.0
         else:
-            # best-effort: search for normalized_url in section text
-            norm = entry.get("normalized_url") or ""
-            found = False
-            for sec in sections:
-                if norm and norm in (sec.get("text") or ""):
-                    evidence["section_id"] = sec["section_id"]
-                    evidence["page"] = sec.get("start_page", evidence["page"])
-                    found = True
-                    break
-            if not found:
-                evidence["section_id"] = None
-        entry["evidence"] = evidence
-        enriched.append(entry)
-    return enriched
+            # if block length > 80 chars, medium confidence
+            conf = 0.6 if len(v) > 80 else 0.2
+        section_confidence[k] = float(conf)
 
-
-def build_candidate_skeleton(sections: List[Dict], meta: Dict) -> Dict:
-    """
-    Create a basic candidate JSON skeleton pre-populated with easy mappings.
-    Now also produces research_papers stubs based on link metadata and publications sections.
-    """
-    skeleton = {
-        "personal_info": {},
-        "skills": [],
-        "projects": [],
-        "education": [],
-        "certifications": [],
-        "publications": [],
-        "research_papers": [],
-        "publications_raw": [],
-        "publications_links": [],
-        "publications_section_ids": [],
-        "publications_detected": False,
-        "links": meta.get("link_metadata", []),
-        "raw_sections": sections,
-    }
-
-    # If Phase1 already provided emails/phones, prefer them
-    emails = meta.get("emails", []) or []
-    phones = meta.get("phones", []) or []
-
-    # minimal personal_info extraction (keeps previous heuristics)
-    # ... reuse earlier heuristics (kept simple here)
-    if sections:
-        first_text = sections[0].get("text", "") or ""
-        # find email/phone in first_text if not present
-        import re
-
-        email_re = re.compile(r"([a-zA-Z0-9_.+\-]+@[a-zA-Z0-9\-]+\.[a-zA-Z0-9\-.]+)")
-        phone_re = re.compile(r"(?:\+\d{1,3}[-\s]?)?(?:\(\d{2,4}\)[-\s]?)?\d{5,12}")
-        if not emails:
-            m = email_re.search(first_text)
-            if m:
-                emails = [m.group(1).lower()]
-        if not phones:
-            m2 = phone_re.search(first_text)
-            if m2:
-                phones = [m2.group(0)]
-        # naive name extraction: first non-empty line not containing email/phone
-        for ln in first_text.splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            if email_re.search(ln) or phone_re.search(ln):
-                continue
-            # pick the first plausible line as name
-            skeleton["personal_info"]["name"] = ln
-            break
-    if emails:
-        skeleton["personal_info"]["email"] = emails[0]
-    if phones:
-        skeleton["personal_info"]["phone"] = phones[0]
-
-    # Enrich links: attach evidence mapping
-    link_meta = meta.get("link_metadata", [])
-    enriched_links = _map_links_to_sections(link_meta, sections)
-    # replace skeleton links with enriched links
-    skeleton["links"] = enriched_links
-
-    # Build research_papers stubs:
-    # 1) From enriched links where type == research_paper
-    for lm in enriched_links:
-        if lm.get("type") == "research_paper":
-            stub = {
-                "title": None,
-                "authors": [],
-                "year": None,
-                "link": lm.get("normalized_url"),
-                "type": lm.get("meta", {}).get("source", "research_paper"),
-                "confidence": lm.get("confidence", 0.75),
-                "evidence": lm.get("evidence"),
-            }
-            skeleton["research_papers"].append(stub)
-            skeleton["publications_links"].append(lm.get("normalized_url"))
-            if lm.get("evidence", {}).get("section_id"):
-                skeleton["publications_section_ids"].append(
-                    lm.get("evidence").get("section_id")
-                )
-                skeleton["publications_detected"] = True
-
-    # 2) If there is a publications section, scan it for DOI/arXiv patterns and add stubs
-    for sec in sections:
-        if sec.get("section_type") == "publications":
-            skeleton["publications_detected"] = True
-            skeleton["publications_raw"].append(sec.get("text"))
-            # quick regex scan inside section text
-            text = sec.get("text") or ""
-            # DOI
-            import re
-
-            doi_matches = re.findall(r"(10\.\d{4,9}/[^\s\)\]\,;]+)", text, flags=re.I)
-            for d in doi_matches:
-                norm = f"doi:{d.lower()}"
-                stub = {
-                    "title": None,
-                    "authors": [],
-                    "year": None,
-                    "link": norm,
-                    "type": "doi",
-                    "confidence": 0.9,
-                    "evidence": {
-                        "section_id": sec.get("section_id"),
-                        "page": sec.get("start_page"),
-                    },
-                }
-                # avoid dups
-                if not any(
-                    s.get("link") == stub["link"] for s in skeleton["research_papers"]
-                ):
-                    skeleton["research_papers"].append(stub)
-            # arXiv
-            arxiv_matches = re.findall(
-                r"([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?)", text, flags=re.I
-            )
-            for a in arxiv_matches:
-                norm = f"https://arxiv.org/abs/{a}"
-                stub = {
-                    "title": None,
-                    "authors": [],
-                    "year": None,
-                    "link": norm,
-                    "type": "arxiv",
-                    "confidence": 0.9,
-                    "evidence": {
-                        "section_id": sec.get("section_id"),
-                        "page": sec.get("start_page"),
-                    },
-                }
-                if not any(
-                    s.get("link") == stub["link"] for s in skeleton["research_papers"]
-                ):
-                    skeleton["research_papers"].append(stub)
-
-    # final candidate id & return
-    skeleton["candidate_id"] = meta.get("candidate_id") or str(uuid.uuid4())
-    return skeleton
+    return {"raw_sections": raw_sections, "section_confidence": section_confidence}
