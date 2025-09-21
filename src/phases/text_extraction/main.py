@@ -22,6 +22,7 @@ import os
 # import the existing pipeline function (keeps original behavior)
 from .helpers.extractor import extract_text_and_meta
 from .helpers.classifier import update_extract_and_clean
+from src.utils.text_utils import clean_text_pipeline
 
 
 def run_text_extraction_pipeline(pdf_path: str) -> Dict[str, Any]:
@@ -79,11 +80,12 @@ def run_text_extraction_from_pdf_bytes(file_bytes: bytes) -> Dict[str, Any]:
                 "phones": [],
             }
 
+        cleaned_text = clean_text_pipeline(
+            result.get("cleaned_text_updated", result.get("clean_text", ""))
+        )
         # guarantee keys exist
         return {
-            "cleaned_text_updated": result.get(
-                "cleaned_text_updated", result.get("clean_text", "")
-            ),
+            "cleaned_text_updated": cleaned_text.lower(),
             "link_metadata": result.get("link_metadata", []),
             "emails": result.get("emails", []),
             "phones": result.get("phones", []),
