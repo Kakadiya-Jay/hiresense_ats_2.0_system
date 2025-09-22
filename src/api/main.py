@@ -5,8 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
+import logging
 
-# register routes
+# configure basic logging for the API
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("hiresense.api")
 
 app = FastAPI(title="HireSense API")
 
@@ -36,15 +39,18 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content={"detail": safe_detail})
 
 
-# -- Register other exception handlers --
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception: %s", exc)
     return JSONResponse(
         status_code=500, content={"detail": "Internal Server Error", "msg": str(exc)}
     )
 
 
-from src.api.routes import resume as resume_router  # will import our router
+# import and register routes
+from src.api.routes import (
+    resume as resume_router,
+)  # imports router from src/api/routes/resume.py
 
 app.include_router(resume_router.router, prefix="", tags=["resume"])
 
