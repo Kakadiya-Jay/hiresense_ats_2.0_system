@@ -14,3 +14,9 @@ httpx
 transformers
 sentencepiece
 torch
+spacy
+dateparser
+numpy
+scikit-learn
+python-Levenshtein
+rapidfuzz
