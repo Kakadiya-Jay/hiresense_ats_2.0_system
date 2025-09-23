@@ -1,131 +1,221 @@
-# sec/api/services/resume_service.py
+# hiresense/src/api/services/resume_service.py
 """
-Resume service: orchestrates extraction (phase-1), sectioning (phase-2),
-and optional feature-extraction (phase-3).
-
-Public function:
- - process_resume_payload(...)
-    - If extraction_json provided: skip text extraction and run sectioning.
-    - Else if pdf_bytes provided: run text extraction (if available) then sectioning.
-    - Optionally runs feature-extraction (if the module is importable).
-    - Returns dict with keys: "sectioned" and, when requested and available, "features".
+Resume service - orchestration layer.
+Added batch scoring helpers: score_batch_by_doc_ids and process_and_score_files_batch.
 """
 
-from typing import Optional, Dict, Any
-import logging
+import os
+import uuid
+from typing import Dict, Any, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+# Import pipeline pieces (adjust import paths if you place helpers elsewhere)
+from src.phases.text_extraction.helpers.pdf_ingest import extract_pdf_text
+from src.phases.text_extraction.helpers.preprocess import (
+    simple_section_split,
+    sentences_from_text,
+    preprocess_for_bm25,
+    tokens_for_sentence,
+)
+from src.phases.embeddings_matching.helpers.bm25_matcher import BM25Matcher
+from src.phases.embeddings_matching.helpers.semantic_matcher import SemanticMatcher
+from src.phases.scoring.helpers.scoring import (
+    combine_scores,
+)
 
-# phase-1 text extraction entrypoint (optional)
-try:
-    from src.phases.text_extraction.main import run_text_extraction_from_pdf_bytes
-except Exception:
-    run_text_extraction_from_pdf_bytes = None
-    logger.debug(
-        "run_text_extraction_from_pdf_bytes not importable; assuming extraction_json will be provided."
-    )
-
-# phase-2 sectioning (required)
-try:
-    from src.phases.sectioning.main import sectionaize_extracted_text
-except Exception as e:
-    sectionaize_extracted_text = None
-    logger.exception("sectionaize_extracted_text import failed: %s", e)
-
-# phase-3 feature extraction (optional)
-try:
-    from src.phases.feature_extraction.main import extract_features_from_sectioned
-except Exception:
-    extract_features_from_sectioned = None
-    logger.debug("Feature extraction module not available; continuing without phase-3.")
+# For a simple in-memory store (demo). Replace with DB/FS for production.
+STORE: Dict[str, Dict[str, Any]] = {}
+UPLOAD_DIR = os.environ.get("HIRE_SENSE_UPLOAD_DIR", "/tmp/hiresense_uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-def process_resume_payload(
-    extraction_json: Optional[Dict[str, Any]] = None,
-    pdf_bytes: Optional[bytes] = None,
-    filename: Optional[str] = None,
-    use_model_fallback: bool = True,
-    run_feature_extraction: bool = True,
-    jd_text: Optional[str] = None,
+def save_upload_bytes(file_bytes: bytes, filename_hint: Optional[str] = None) -> str:
+    """Save uploaded bytes to a local file and return path."""
+    file_id = str(uuid.uuid4())
+    # keep .pdf extension
+    safe_hint = filename_hint.replace(" ", "_") if filename_hint else "upload.pdf"
+    name = f"{file_id}_{safe_hint}"
+    if not name.lower().endswith(".pdf"):
+        name = name + ".pdf"
+    path = os.path.join(UPLOAD_DIR, name)
+    with open(path, "wb") as f:
+        f.write(file_bytes)
+    return path
+
+
+def process_pdf(path: str, persist: bool = True) -> Dict[str, Any]:
+    """
+    Run ingestion + preprocessing on given PDF file path.
+    Returns a dictionary with:
+      - doc_id
+      - full_text
+      - pages
+      - page_blocks
+      - sections (heuristic)
+      - sentences (list)
+      - tokenized (for bm25: list[list[str]])
+    """
+    ingested = extract_pdf_text(path)  # {"full_text", "pages", "page_blocks"}
+    full_text = ingested.get("full_text", "")
+    pages = ingested.get("pages", [])
+    page_blocks = ingested.get("page_blocks", [])
+
+    # Section heuristics
+    sections = simple_section_split(full_text)
+
+    # Sentence segmentation and BM25 tokenization
+    sentences = sentences_from_text(full_text)
+    tokenized = preprocess_for_bm25(full_text)
+
+    doc_id = str(uuid.uuid4())
+    result = {
+        "doc_id": doc_id,
+        "path": path,
+        "full_text": full_text,
+        "pages": pages,
+        "page_blocks": page_blocks,
+        "sections": sections,
+        "sentences": sentences,
+        "tokenized": tokenized,
+    }
+
+    if persist:
+        STORE[doc_id] = result
+    return result
+
+
+def get_stored_doc(doc_id: str) -> Optional[Dict[str, Any]]:
+    return STORE.get(doc_id)
+
+
+def match_job_description(doc_id: str, job_description: str, top_k: int = 5) -> Dict:
+    """
+    Perform BM25 + semantic matching for stored doc doc_id against job_description,
+    combine scores and return result list.
+    """
+    doc = get_stored_doc(doc_id)
+    if not doc:
+        raise KeyError(f"doc_id {doc_id} not found")
+
+    # BM25 on tokenized sentences
+    bm25 = BM25Matcher(doc["tokenized"])
+    q_tokens = tokens_for_sentence(job_description)
+    bm25_res = bm25.query(q_tokens, top_k=top_k)
+
+    # Semantic matcher on sentence texts
+    sem = SemanticMatcher(doc["sentences"])
+    sem_res = sem.query(job_description, top_k=top_k)
+
+    combined = combine_scores(bm25_res, sem_res, w_bm25=0.5, w_sem=0.5, top_k=top_k)
+
+    # Map combined to sentences + explanatory fields
+    matches = []
+    for item in combined:
+        idx = item["idx"]
+        matches.append(
+            {
+                "sentence_idx": idx,
+                "sentence": doc["sentences"][idx],
+                "bm25_raw": item["bm25_raw"],
+                "sem_raw": item["sem_raw"],
+                "bm25_norm": item["bm25_norm"],
+                "sem_norm": item["sem_norm"],
+                "score": item["combined_score"],
+            }
+        )
+
+    return {"doc_id": doc_id, "matches": matches, "top_k": top_k}
+
+
+def score_resume(
+    doc_id: str,
+    job_description: str,
+    required_keywords: Optional[List[str]] = None,
+    top_k: int = 5,
+) -> Dict:
+    """
+    Aggregate top-k match scores into a final score and include small heuristics
+    (keyword coverage bonus).
+    """
+    match_res = match_job_description(doc_id, job_description, top_k=top_k)
+    top_scores = [m["score"] for m in match_res["matches"]]
+
+    mean_top = float(sum(top_scores) / max(1, len(top_scores)))
+
+    keyword_bonus = 0.0
+    if required_keywords:
+        full_text_low = get_stored_doc(doc_id)["full_text"].lower()
+        found = sum(1 for k in required_keywords if k.strip().lower() in full_text_low)
+        keyword_bonus = (found / max(1, len(required_keywords))) * 0.1
+
+    final_score = min(1.0, mean_top + keyword_bonus)
+
+    return {
+        "doc_id": doc_id,
+        "final_score": final_score,
+        "mean_top_scores": mean_top,
+        "keyword_bonus": keyword_bonus,
+        "matches": match_res["matches"],
+    }
+
+
+# ----------------------------
+# New: Batch helpers
+# ----------------------------
+
+
+def score_batch_by_doc_ids(
+    doc_ids: List[str],
+    job_description: str,
+    required_keywords: Optional[List[str]] = None,
+    top_k: int = 5,
 ) -> Dict[str, Any]:
     """
-    Orchestrate resume processing.
-
-    Returns a dict containing at minimum:
-      {
-        "status": "ok",
-        "sectioned": { ... }            # phase-2 output (if produced / provided)
-        "features": { ... }             # phase-3 output (if requested and available)
-      }
-
-    Args:
-      extraction_json: if provided, should be phase-1 output and will be sectioned.
-      pdf_bytes: raw PDF bytes; used when extraction_json not provided.
-      filename: optional filename for logging / heuristics.
-      use_model_fallback: passed to sectioning.
-      run_feature_extraction: when True and feature-extraction available, run it.
-      jd_text: optional job-description text to pass to feature extractor for semantic matching.
+    Score multiple existing stored docs by doc_id.
+    Returns dict with 'results' (list of per-doc results) and 'errors' (list of error entries).
     """
-
-    if extraction_json is None and pdf_bytes is None:
-        raise ValueError("Provide either extraction_json or pdf_bytes")
-
-    # Ensure sectioning function exists
-    if sectionaize_extracted_text is None:
-        raise RuntimeError(
-            "Sectioning function not found. Ensure src.phases.sectioning.main.sectionaize_extracted_text is implemented and importable."
-        )
-
-    # If extraction_json provided: skip text extraction
-    if extraction_json is not None:
-        logger.info("Processing provided extraction_json through sectioning")
-        sectioned = sectionaize_extracted_text(
-            extraction_json, use_model_fallback=use_model_fallback
-        )
-        # attach original extraction (useful for debugging)
-        sectioned["raw_extraction"] = extraction_json
-    else:
-        # pdf_bytes path: ensure extractor exists
-        if run_text_extraction_from_pdf_bytes is None:
-            raise RuntimeError(
-                "Text extraction function not found. Provide extraction_json or implement src.phases.text_extraction.main.run_text_extraction_from_pdf_bytes"
-            )
+    results = []
+    errors = []
+    for did in doc_ids:
         try:
-            logger.info("Running text extraction on provided PDF bytes")
-            extraction_json = run_text_extraction_from_pdf_bytes(
-                pdf_bytes,
+            if not get_stored_doc(did):
+                raise KeyError(f"doc_id {did} not found")
+            scored = score_resume(
+                did, job_description, required_keywords=required_keywords, top_k=top_k
             )
+            results.append(scored)
         except Exception as e:
-            logger.exception("Text extraction failed: %s", e)
-            raise
+            errors.append({"doc_id": did, "error": str(e)})
+    return {"results": results, "errors": errors, "count": len(results)}
 
-        # sectionize
-        sectioned = sectionaize_extracted_text(
-            extraction_json, use_model_fallback=use_model_fallback
-        )
-        sectioned["raw_extraction"] = extraction_json
 
-    response: Dict[str, Any] = {"status": "ok", "sectioned": sectioned}
-
-    # Optionally run feature extraction (phase-3) if module present
-    if run_feature_extraction:
-        if extract_features_from_sectioned is None:
-            logger.warning(
-                "Requested feature extraction but extract_features_from_sectioned not available."
+def process_and_score_files_batch(
+    uploaded_files: List[Tuple[bytes, str]],
+    job_description: str,
+    required_keywords: Optional[List[str]] = None,
+    top_k: int = 5,
+) -> Dict[str, Any]:
+    """
+    Accepts a list of tuples (file_bytes, filename_hint).
+    For each file:
+      - save bytes
+      - process PDF (process_pdf)
+      - score using score_resume
+    Returns results + errors.
+    """
+    results = []
+    errors = []
+    for file_bytes, filename in uploaded_files:
+        try:
+            saved_path = save_upload_bytes(file_bytes, filename_hint=filename)
+            processed = process_pdf(saved_path, persist=True)
+            doc_id = processed["doc_id"]
+            scored = score_resume(
+                doc_id,
+                job_description,
+                required_keywords=required_keywords,
+                top_k=top_k,
             )
-            response["features"] = None
-            response["feature_extraction_note"] = "module_not_available"
-        else:
-            try:
-                logger.info("Running feature extraction on sectioned JSON")
-                features = extract_features_from_sectioned(sectioned, jd_text=jd_text)
-                response["features"] = features
-            except Exception as e:
-                logger.exception("Feature extraction failed: %s", e)
-                response["features"] = None
-                response["feature_extraction_error"] = str(e)
-    else:
-        response["features"] = None
-        response["feature_extraction_note"] = "run_feature_extraction=False"
-
-    return response
+            results.append(scored)
+        except Exception as e:
+            errors.append({"filename": filename, "error": str(e)})
+    return {"results": results, "errors": errors, "count": len(results)}

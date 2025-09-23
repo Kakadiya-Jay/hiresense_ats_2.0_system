@@ -1,22 +1,12 @@
 fastapi
 uvicorn[standard]
-streamlit
 python-multipart
-pytesseract
-PyMuPDF
-sentence-transformers
-phonenumbers
-REQ
-pillow
-pytest
-requests
-httpx
-transformers
-sentencepiece
-torch
+PyMuPDF             # pip name: pymupdf
 spacy
-dateparser
-numpy
+en-core-web-sm      # spaCy model; install via: python -m spacy download en_core_web_sm
+sentence-transformers
+rank_bm25
 scikit-learn
-python-Levenshtein
-rapidfuzz
+numpy
+pydantic
+typing-extensions
