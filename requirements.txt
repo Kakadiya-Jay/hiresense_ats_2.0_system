@@ -10,3 +10,11 @@ scikit-learn
 numpy
 pydantic
 typing-extensions
+sqlalchemy
+python-dotenv
+passlib[bcrypt]
+bcrypt==3.2.2
+python-jose
+pymysql
+email-validator
+streamlit
