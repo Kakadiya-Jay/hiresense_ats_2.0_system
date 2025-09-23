@@ -4,6 +4,7 @@ __pycache__/
 data/
 *.py[cod]
 *$py.class
+.env
 .idea
 .__pycache__
 
