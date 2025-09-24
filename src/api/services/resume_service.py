@@ -91,6 +91,10 @@ def match_job_description(doc_id: str, job_description: str, top_k: int = 5) -> 
     """
     Perform BM25 + semantic matching for stored doc doc_id against job_description,
     combine scores and return result list.
+
+    This implementation is robust: it accepts scorer outputs that use either
+    'combined_score' or 'score' as the combined-score field and normalizes
+    results to always include both keys.
     """
     doc = get_stored_doc(doc_id)
     if not doc:
@@ -105,21 +109,35 @@ def match_job_description(doc_id: str, job_description: str, top_k: int = 5) -> 
     sem = SemanticMatcher(doc["sentences"])
     sem_res = sem.query(job_description, top_k=top_k)
 
+    # combine_bm25_semantic returns dicts that may use key names like 'combined_score'
     combined = combine_scores(bm25_res, sem_res, w_bm25=0.5, w_sem=0.5, top_k=top_k)
 
-    # Map combined to sentences + explanatory fields
+    # Map combined to sentences + explanatory fields.
+    # Be tolerant: some implementations return 'combined_score', others return 'score'
     matches = []
     for item in combined:
-        idx = item["idx"]
+        idx = item.get("idx")
+        # read value from whichever key exists
+        combined_score = item.get(
+            "combined_score", item.get("score", item.get("combined", 0.0))
+        )
+        # also expose consistent "score" field for older callers
+        score_val = float(combined_score)
         matches.append(
             {
                 "sentence_idx": idx,
-                "sentence": doc["sentences"][idx],
-                "bm25_raw": item["bm25_raw"],
-                "sem_raw": item["sem_raw"],
-                "bm25_norm": item["bm25_norm"],
-                "sem_norm": item["sem_norm"],
-                "score": item["combined_score"],
+                "sentence": (
+                    doc["sentences"][idx]
+                    if idx is not None and idx < len(doc["sentences"])
+                    else ""
+                ),
+                "bm25_raw": item.get("bm25_raw", 0.0),
+                "sem_raw": item.get("sem_raw", 0.0),
+                "bm25_norm": item.get("bm25_norm", 0.0),
+                "sem_norm": item.get("sem_norm", 0.0),
+                # expose both keys (backwards & forwards compat)
+                "combined_score": score_val,
+                "score": score_val,
             }
         )
 
@@ -133,11 +151,20 @@ def score_resume(
     top_k: int = 5,
 ) -> Dict:
     """
-    Aggregate top-k match scores into a final score and include small heuristics
-    (keyword coverage bonus).
+    Aggregate top-k match scores into a final score and include small heuristics (keyword coverage bonus).
+
+    This function is tolerant to either 'combined_score' or 'score' fields in match items.
     """
     match_res = match_job_description(doc_id, job_description, top_k=top_k)
-    top_scores = [m["score"] for m in match_res["matches"]]
+    # use whichever key exists, but prefer 'score'
+    top_scores = []
+    for m in match_res["matches"]:
+        if "score" in m:
+            top_scores.append(float(m["score"]))
+        elif "combined_score" in m:
+            top_scores.append(float(m["combined_score"]))
+        else:
+            top_scores.append(0.0)
 
     mean_top = float(sum(top_scores) / max(1, len(top_scores)))
 
