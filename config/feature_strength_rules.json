@@ -1,0 +1,43 @@
+{
+    "description": "MVP heuristics for assigning feature_strength on extracted items. Simple rules; adapt to production later.",
+    "rules": {
+        "projects": {
+            "has_repo_link": 0.95,
+            "has_tech_stack": 0.9,
+            "has_outcome_or_metric": 0.9,
+            "title_only": 0.5,
+            "default": 0.75
+        },
+        "open_source": {
+            "has_repo_star_or_pr_count": 0.95,
+            "has_repo_link": 0.85,
+            "contribution_line_items": 0.9,
+            "default": 0.6
+        },
+        "skills": {
+            "explicit_skill_list": 0.9,
+            "single_mention": 0.6,
+            "certified_skill": 0.95,
+            "default": 0.7
+        },
+        "experience": {
+            "years_gt_5": 0.95,
+            "years_2_to_5": 0.9,
+            "years_lt_2": 0.7,
+            "senior_title": 0.95,
+            "default": 0.8
+        },
+        "education": {
+            "phd": 0.95,
+            "masters": 0.85,
+            "bachelors_top_college": 0.8,
+            "default": 0.6
+        },
+        "research_papers": {
+            "indexed_journal": 0.95,
+            "conference_with_proceedings": 0.9,
+            "preprint": 0.7,
+            "default": 0.6
+        }
+    }
+}

@@ -1,0 +1,120 @@
+{
+  "candidate": {
+    "candidate_id": "demo_001",
+    "features": {
+      "projects": [
+        {
+          "title": "Smart Resume Parser",
+          "summary": "Built resume parser",
+          "tech_stack": [
+            "python",
+            "nlp"
+          ],
+          "feature_strength": 0.85
+        }
+      ],
+      "skills": {
+        "programming": [
+          "python",
+          "django",
+          "sql"
+        ],
+        "ml": [
+          "sklearn",
+          "pandas"
+        ]
+      },
+      "experience": [
+        {
+          "company": "Acme",
+          "role": "ML Engineer",
+          "duration_months": 24,
+          "feature_strength": 0.9
+        }
+      ],
+      "education": [
+        {
+          "degree": "B.Tech",
+          "institute": "XYZ Univ",
+          "year": 2021
+        }
+      ],
+      "open_source": [
+        {
+          "repo": "github.com/demo/resume-parser",
+          "feature_strength": 0.6
+        }
+      ],
+      "research_papers": []
+    }
+  },
+  "score_result": {
+    "final_score": 0.380183441138607,
+    "per_feature": {
+      "projects": {
+        "base_weight": 0.3,
+        "jd_importance": 0.16896797716617584,
+        "candidate_strength": 0.85,
+        "semantic_similarity": 0.7188101410865784,
+        "evidence": [
+          "Smart Resume Parser | Built resume parser | python nlp"
+        ],
+        "final_weight": 0.26485375543665385,
+        "contribution": 0.19037956531273129
+      },
+      "open_source": {
+        "base_weight": 0.15,
+        "jd_importance": 0.19979336857795715,
+        "candidate_strength": 0.0,
+        "semantic_similarity": 0.0,
+        "evidence": [],
+        "final_weight": 0.10678681850244781,
+        "contribution": 0.0
+      },
+      "skills": {
+        "base_weight": 0.25,
+        "jd_importance": 0.4646981656551361,
+        "candidate_strength": 0.8,
+        "semantic_similarity": 0.42562001943588257,
+        "evidence": [
+          "python",
+          "django",
+          "sql",
+          "sklearn",
+          "pandas"
+        ],
+        "final_weight": 0.2794619565462888,
+        "contribution": 0.11894460337682121
+      },
+      "experience": {
+        "base_weight": 0.2,
+        "jd_importance": 0.3439401388168335,
+        "candidate_strength": 0.9,
+        "semantic_similarity": 0.2883097529411316,
+        "evidence": [
+          "ML Engineer | Acme"
+        ],
+        "final_weight": 0.24577480201831026,
+        "contribution": 0.07085927244905456
+      },
+      "education": {
+        "base_weight": 0.05,
+        "jd_importance": 0.2475779801607132,
+        "candidate_strength": 0.0,
+        "semantic_similarity": 0.0,
+        "evidence": [],
+        "final_weight": 0.06321275665452111,
+        "contribution": 0.0
+      },
+      "research_papers": {
+        "base_weight": 0.05,
+        "jd_importance": 0.09487020969390869,
+        "candidate_strength": 0.0,
+        "semantic_similarity": 0.0,
+        "evidence": [],
+        "final_weight": 0.039909910841778196,
+        "contribution": 0.0
+      }
+    }
+  }
+}

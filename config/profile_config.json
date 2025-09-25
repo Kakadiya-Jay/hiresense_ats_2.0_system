@@ -1,0 +1,30 @@
+{
+    "description": "Profile base weights per role. Each role maps feature->base_weight (should sum to 1 or will be normalized).",
+    "roles": {
+        "developer": {
+            "projects": 0.35,
+            "open_source": 0.20,
+            "skills": 0.25,
+            "experience": 0.15,
+            "education": 0.03,
+            "research_papers": 0.02
+        },
+        "researcher": {
+            "projects": 0.10,
+            "open_source": 0.05,
+            "skills": 0.15,
+            "experience": 0.10,
+            "education": 0.10,
+            "research_papers": 0.50
+        },
+        "analyst": {
+            "projects": 0.15,
+            "open_source": 0.05,
+            "skills": 0.30,
+            "experience": 0.30,
+            "education": 0.10,
+            "research_papers": 0.10
+        }
+    },
+    "default_role": "developer"
+}
