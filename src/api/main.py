@@ -10,6 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # Import routers
 from src.api.routes import resume  # ensure this package is importable
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
 app = FastAPI(title="HireSense API", version="0.1")
 
 # CORS for local dev / Streamlit frontends
@@ -29,4 +34,3 @@ app.include_router(resume.router)
 @app.get("/health")
 def health():
     return {"status": "ok", "message": "HireSense API is running"}
-

@@ -1,5 +1,14 @@
 from fastapi import FastAPI
-from src.api.routes import auth, admin
+from src.api.routes import auth
+
+from src.api.routes import admin as admin_mod
+
+admin_router = admin_mod.router
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.db.session import Base, engine
 import src.models.user as _user  # to register model metadata
 
@@ -9,7 +18,9 @@ app = FastAPI(title="HireSense - Auth & Admin MVP")
 Base.metadata.create_all(bind=engine)
 
 app.include_router(auth.router)
-app.include_router(admin.router)
+
+if admin_router:
+    app.include_router(admin_router, tags=["admin"])
 
 
 @app.get("/")
