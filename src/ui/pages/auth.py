@@ -11,56 +11,69 @@ from src.ui.context import (
     extract_user_info_from_login,
 )
 from src.api.ui_integration.auth_api import login as api_login, signup as api_signup
+from src.ui import components
 
 
 def login_page():
     st.title("HireSense - Login")
     email = st.text_input("Email", key="login_email_page")
     password = st.text_input("Password", type="password", key="login_password_page")
-    if st.button("Login"):
+    if st.button("Sign In", key="do_login"):
+        # Call backend login wrapper
         try:
             resp_json, status = api_login(email, password)
-
-            # after resp_json = ... (the parsed response from backend)
-            with st.expander("DEBUG: login response (raw)"):
-                st.json(resp_json)
-
-            with st.expander("DEBUG: session_state after login"):
-                st.json(
-                    {
-                        k: v
-                        for k, v in st.session_state.items()
-                        if "user" in k or "recruiter" in k
-                    }
-                )
 
         except Exception as e:
             st.error(f"Login request failed: {e}")
             return
-        if status == 200:
-            token = resp_json.get("access_token") or resp_json.get("token")
-            if token:
-                st.session_state["access_token"] = token
-            # extract name and role if present
-            name, role, recruiter_role = extract_user_info_from_login(
+        if status == 200 and isinstance(resp_json, dict):
+            token = (
+                resp_json.get("access_token")
+                or resp_json.get("token")
+                or resp_json.get("auth_token")
+                or resp_json.get("data", {}).get("access_token")
+            )
+            if not token:
+                st.error("Login succeeded but no token returned.")
+                return
+            st.success("Login successful.")
+            # store token in session:
+
+            # canonical key used across app:
+            st.session_state["access_token"] = token
+            # backward-compatible: keep old key too for modules that still check it
+            st.session_state["auth_token"] = token
+
+            # populate legacy session short-fields
+            display_name, system_role, recruiter_role = extract_user_info_from_login(
                 resp_json, fallback_email=email
             )
+            set_user_in_session(display_name, system_role, recruiter_role)
 
-            # Store in session_state
-            st.session_state["user_name"] = name or "User"
-            st.session_state["user_role"] = role or "recruiter"
-            if recruiter_role:
-                st.session_state["recruiter_role"] = recruiter_role
+            # immediately fetch full profile into current_user
+            try:
+                components.get_current_user()  # this helper should rely on get_auth_headers or access_token
+            except Exception as e:
+                st.warning(f"Failed to fetch profile immediately: {e}")
 
-            set_user_in_session(name, role, recruiter_role)
-            st.success("Login successful")
-            st.session_state["page"] = "Recruiter Dashboard"
+            # route user
+            user = st.session_state.get("current_user") or {"role": system_role}
+            role = user.get("role") or system_role or "recruiter"
+            if role == "admin":
+                st.session_state["page"] = "Admin Dashboard"
+                st.session_state["active_page"] = "Admin Dashboard"
+            else:
+                st.session_state["page"] = "Recruiter Dashboard"
+                st.session_state["active_page"] = "Recruiter Dashboard"
+
+            # rerun to update UI immediately
             safe_rerun()
         else:
+            # show error returned by API
             try:
-                st.error(resp_json.get("detail", "Login failed"))
+                st.error(resp_json.get("detail", "Invalid credentials"))
             except Exception:
-                st.error("Login failed")
+                st.error("Login failed. Please check credentials and try again.")
 
 
 def signup_page():
