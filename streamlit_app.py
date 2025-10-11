@@ -31,26 +31,48 @@ except Exception:
 # App setup
 st.set_page_config(layout="wide", page_title="HireSense (MVP)")
 
+# Load current user into session_state if possible (non-blocking)
+try:
+    components.ensure_me_loaded()
+except Exception:
+    pass
+
 # Sidebar Navigation
 with st.sidebar:
-    st.title("HireSense")
-    st.markdown("## Navigation")
+    st.markdown("## HireSense")
+    st.markdown("### Navigation")
 
-    if st.button("Log in"):
-        st.session_state["page"] = "Login"
-    if st.button("Sign up"):
-        st.session_state["page"] = "Signup"
-    if st.button("Recruiter Dashboard"):
-        st.session_state["page"] = "Recruiter Dashboard"
-    if st.button("Admin Dashboard"):
-        st.session_state["page"] = "Admin Dashboard"
-    if st.button("Profile"):
-        st.session_state["page"] = "Profile"
+    # Use current_user to decide whether to show Log in / Sign up
+    current_user = st.session_state.get("current_user")
 
-    st.markdown("---")
-    if st.session_state.get("auth_token"):
-        if st.button("Log out"):
+    if current_user:
+        if st.button("Recruiter Dashboard", key="nav_recruiter"):
+            st.session_state["page"] = "Recruiter Dashboard"
+        if st.button("Admin Dashboard", key="nav_admin"):
+            st.session_state["page"] = "Admin Dashboard"
+        if st.button("Profile", key="nav_profile"):
+            st.session_state["page"] = "Profile"
+
+        st.markdown("---")
+        if st.button("Log out", key="nav_logout"):
             components.logout_and_clear()
+    else:
+        # Not logged in: show login/signup options
+        if st.button("Log in", key="nav_login"):
+            st.session_state["page"] = "Login"
+        if st.button("Sign up", key="nav_signup"):
+            st.session_state["page"] = "Signup"
+
+        # still show navigation (optional — keep so user can open pages even when not logged in)
+        if st.button("Recruiter Dashboard", key="nav_recruiter"):
+            st.session_state["page"] = "Recruiter Dashboard"
+        if st.button("Admin Dashboard", key="nav_admin"):
+            st.session_state["page"] = "Admin Dashboard"
+        if st.button("Profile", key="nav_profile"):
+            st.session_state["page"] = "Profile"
+
+        st.markdown("---")
+        st.write("You are not signed in.")
 
 # Default page
 if "page" not in st.session_state:

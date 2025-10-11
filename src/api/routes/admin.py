@@ -147,7 +147,7 @@ def approve_user(
 @router.post("/reject/{user_id}")
 def reject_user(
     user_id: int,
-    reason: str = "",
+    reason: str = "Your signup request did not meet our criteria. Please contact support for more details.",
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
@@ -169,10 +169,7 @@ def reject_user(
         )
         send_email(user.email, subject, body)
 
-    if background_tasks:
-        background_tasks.add_task(send_reject_email)
-    else:
-        send_reject_email()
+    background_tasks.add_task(send_reject_email)
     return {"message": "User rejected and notified."}
 
 

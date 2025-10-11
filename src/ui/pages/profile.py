@@ -34,12 +34,7 @@ def render_profile_card():
 
     # Details card
     with st.container():
-        st.markdown(
-            """
-            <div style='padding:20px;border-radius:8px;background:#111;'>
-        """,
-            unsafe_allow_html=True,
-        )
+        st.divider()
         col1, col2 = st.columns(2)
         with col1:
             st.markdown(f"**Business name**  \n{user.get('business_name') or '—'}")

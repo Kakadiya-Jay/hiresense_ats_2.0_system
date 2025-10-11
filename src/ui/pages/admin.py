@@ -106,7 +106,7 @@ def _render_paginated_table(
             )
             display_email = row.get("Email") or row.get("email") or ""
             display_role = row.get("Role") or row.get("role") or ""
-            st.markdown(f"**{display_name}** — {display_email} — role: {display_role}")
+            st.markdown(f"**{display_name}** | {display_email} | role: {display_role}")
 
         with cols[1]:
             # USERS table actions
@@ -157,7 +157,7 @@ def _render_paginated_table(
                 key_reject = f"reject_{row_id_str}_{page_key}"
                 subc = st.columns([1, 1])
                 with subc[0]:
-                    if st.button("Approve", key=key_approve):
+                    if st.button("Allow", key=key_approve):
                         try:
                             ok = components.admin_approve_user(int(raw_id))
                         except Exception:

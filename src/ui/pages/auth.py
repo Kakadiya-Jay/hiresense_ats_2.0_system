@@ -15,65 +15,111 @@ from src.ui import components
 
 
 def login_page():
-    st.title("HireSense - Login")
-    email = st.text_input("Email", key="login_email_page")
-    password = st.text_input("Password", type="password", key="login_password_page")
-    if st.button("Sign In", key="do_login"):
-        # Call backend login wrapper
-        try:
-            resp_json, status = api_login(email, password)
+    """
+    Login form + handler.
 
-        except Exception as e:
-            st.error(f"Login request failed: {e}")
+    On successful login:
+      - stores token into st.session_state["auth_token"] and ["access_token"]
+      - immediately calls components.ensure_me_loaded(force=True) to load /auth/me
+      - routes to Admin Dashboard if role == 'admin', otherwise to Recruiter Dashboard
+      - triggers safe_rerun() so UI (sidebar / top-right) updates immediately
+    """
+    import requests
+    from src.ui import components
+    from src.ui.context import st, safe_rerun
+
+    st.title("Hiresense - Login")
+
+    # simple form
+    email = st.text_input("Email", value=st.session_state.get("last_email", ""))
+    password = st.text_input("Password", type="password")
+
+    # preserve last typed email so user doesn't need to retype after failed login
+    if email:
+        st.session_state["last_email"] = email
+
+    if st.button("Sign In"):
+        if not email or not password:
+            st.error("Please provide both email and password.")
             return
-        if status == 200 and isinstance(resp_json, dict):
+
+        login_url = f"{components.AUTH_API_BASE_URL}/auth/login"
+        payload = {"email": email, "password": password}
+        try:
+            resp = requests.post(login_url, json=payload, timeout=8)
+        except requests.RequestException as e:
+            st.error(f"Network error when calling login endpoint: {e}")
+            return
+
+        # happy path
+        if resp.status_code in (200, 201):
+            try:
+                data = resp.json()
+            except Exception:
+                st.error("Login succeeded but server returned unexpected payload.")
+                return
+
+            # common token keys: access_token, token, auth_token
             token = (
-                resp_json.get("access_token")
-                or resp_json.get("token")
-                or resp_json.get("auth_token")
-                or resp_json.get("data", {}).get("access_token")
+                data.get("access_token") or data.get("token") or data.get("auth_token")
             )
             if not token:
-                st.error("Login succeeded but no token returned.")
+                # sometimes API returns token under different key or nested; show whole payload for debugging
+                st.error(
+                    "Login response did not contain an access token. Response: "
+                    + str(data)
+                )
                 return
-            st.success("Login successful.")
-            # store token in session:
 
-            # canonical key used across app:
-            st.session_state["access_token"] = token
-            # backward-compatible: keep old key too for modules that still check it
+            # store token(s) in session for other helpers/components to use
             st.session_state["auth_token"] = token
+            st.session_state["access_token"] = token
+            # optionally store raw login response for debugging
+            st.session_state["_raw_login_response"] = data
 
-            # populate legacy session short-fields
-            display_name, system_role, recruiter_role = extract_user_info_from_login(
-                resp_json, fallback_email=email
-            )
-            set_user_in_session(display_name, system_role, recruiter_role)
+            st.success("Login successful — loading profile...")
 
-            # immediately fetch full profile into current_user
-            try:
-                components.get_current_user()  # this helper should rely on get_auth_headers or access_token
-            except Exception as e:
-                st.warning(f"Failed to fetch profile immediately: {e}")
+            # Immediately fetch current user from /auth/me. We force the re-fetch to guarantee fresh profile.
+            # components.ensure_me_loaded will populate st.session_state['current_user'] or clear auth on 401.
+            user = components.ensure_me_loaded(force=True)
 
-            # route user
-            user = st.session_state.get("current_user") or {"role": system_role}
-            role = user.get("role") or system_role or "recruiter"
+            if not user:
+                # ensure_me_loaded already rendered messages for unauthorized/network errors.
+                # If it returned None but we still have token, at least show a friendly message.
+                st.warning(
+                    "Logged in but couldn't fetch profile. Try refreshing the page."
+                )
+                # Leave token set — user may still be able to reload manually
+                return
+
+            # route based on role
+            role = (user.get("role") or "").lower()
             if role == "admin":
                 st.session_state["page"] = "Admin Dashboard"
-                st.session_state["active_page"] = "Admin Dashboard"
             else:
+                # default to recruiter dashboard for non-admin roles
                 st.session_state["page"] = "Recruiter Dashboard"
-                st.session_state["active_page"] = "Recruiter Dashboard"
 
-            # rerun to update UI immediately
+            # remove Login/Signup visibility is handled by sidebar render (it should check current_user)
+            # trigger a rerun to update UI immediately
             safe_rerun()
-        else:
-            # show error returned by API
-            try:
-                st.error(resp_json.get("detail", "Invalid credentials"))
-            except Exception:
-                st.error("Login failed. Please check credentials and try again.")
+            return
+
+        # failure path: show server-side message when available
+        try:
+            err = resp.json()
+            # best-effort parsing of typical error shapes
+            msg = (
+                err.get("detail")
+                or err.get("message")
+                or err.get("error")
+                or err.get("msg")
+                or str(err)
+            )
+        except Exception:
+            msg = f"Login failed (status={resp.status_code})"
+
+        st.error(f"Sign in failed: {msg}")
 
 
 def signup_page():
