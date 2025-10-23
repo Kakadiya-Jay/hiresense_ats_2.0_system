@@ -1,4 +1,4 @@
-# hiresense/src/api/services/resume_service.py
+#src/api/services/resume_service.py
 """
 Resume service - orchestration layer.
 Added batch scoring helpers: score_batch_by_doc_ids and process_and_score_files_batch.
