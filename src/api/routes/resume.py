@@ -1,4 +1,4 @@
-# hiresense/src/api/routes/resume.py
+# src/api/routes/resume.py
 """
 FastAPI routes for resume processing.
  - POST /process_resume : upload PDF -> returns doc_id + processed summary
@@ -24,6 +24,8 @@ from src.api.services.resume_service import (
     score_batch_by_doc_ids,
     process_and_score_files_batch,
 )
+
+from src.phases.scoring.helpers.scorer import score_candidate
 
 router = APIRouter(prefix="/resume", tags=["resume"])
 logger = logging.getLogger("hiresense.routes.resume")
@@ -86,16 +88,27 @@ class ScoreRequest(BaseModel):
 def score_resume_route(req: ScoreRequest):
     if not get_stored_doc(req.doc_id):
         raise HTTPException(status_code=404, detail="doc_id not found")
-    keywords = (
-        [k.strip() for k in req.required_keywords.split(",")]
-        if req.required_keywords
-        else None
-    )
     try:
-        res = score_resume(
-            req.doc_id, req.job_description, required_keywords=keywords, top_k=req.top_k
+        # get stored processed document (assumes process_pdf saved 'candidate_json' or similar)
+        stored = get_stored_doc(
+            req.doc_id
+        )  # expected to return processed pipeline dict
+        # Decide where the candidate JSON lives in stored object. Common keys: 'candidate_json', 'sections', 'sentences', 'features'
+        # Try common locations:
+        candidate_json = (
+            stored.get("candidate_json")
+            or stored.get("features")
+            or stored.get("extracted")
+            or {}
         )
-        return JSONResponse(content=res)
+        if not candidate_json:
+            # As fallback, build candidate_json from stored 'sections' or other fields — adapt as needed
+            # Example: if stored['sections'] contains 'skills' or 'experience' — map accordingly
+            candidate_json = {}  # minimal fallback
+        # Call scorer
+        result = score_candidate(candidate_json, req.job_description)
+        # Optionally wrap with other metadata if your previous API expected it
+        return JSONResponse(content=result)
     except KeyError:
         raise HTTPException(status_code=404, detail="doc_id not found")
     except Exception as e:

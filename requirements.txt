@@ -19,3 +19,4 @@ pymysql
 email-validator
 streamlit
 PyJWT
+torch
