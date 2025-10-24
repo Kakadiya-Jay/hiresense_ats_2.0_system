@@ -23,6 +23,7 @@ from src.api.services.resume_service import (
     score_resume,
     score_batch_by_doc_ids,
     process_and_score_files_batch,
+    STORE
 )
 
 from src.phases.scoring.helpers.scorer import score_candidate
@@ -86,33 +87,90 @@ class ScoreRequest(BaseModel):
 
 @router.post("/score_resume")
 def score_resume_route(req: ScoreRequest):
-    if not get_stored_doc(req.doc_id):
-        raise HTTPException(status_code=404, detail="doc_id not found")
+    """
+    Score a processed resume by doc_id.
+
+    Expected request body (ScoreRequest):
+      - doc_id: str
+      - job_description: str
+      - required_keywords: Optional[str]
+      - top_k: Optional[int]
+
+    Behavior:
+      - Fetch the stored processed doc by doc_id.
+      - Use stored['candidate_json'] if present; else try stored['features'].
+      - If still missing, run feature extractor on stored['sections'] (on-the-fly fallback),
+        map to candidate_json and persist back to store for future calls.
+      - Call score_candidate(...) and return result JSON (includes doc_id).
+    """
+    # Validate and fetch stored document
+    if not req.doc_id:
+        raise HTTPException(status_code=400, detail="doc_id is required")
+    # Try to fetch via get_stored_doc if available; else fallback to STORE dict
     try:
-        # get stored processed document (assumes process_pdf saved 'candidate_json' or similar)
-        stored = get_stored_doc(
-            req.doc_id
-        )  # expected to return processed pipeline dict
-        # Decide where the candidate JSON lives in stored object. Common keys: 'candidate_json', 'sections', 'sentences', 'features'
-        # Try common locations:
-        candidate_json = (
-            stored.get("candidate_json")
-            or stored.get("features")
-            or stored.get("extracted")
-            or {}
-        )
-        if not candidate_json:
-            # As fallback, build candidate_json from stored 'sections' or other fields — adapt as needed
-            # Example: if stored['sections'] contains 'skills' or 'experience' — map accordingly
-            candidate_json = {}  # minimal fallback
-        # Call scorer
-        result = score_candidate(candidate_json, req.job_description)
-        # Optionally wrap with other metadata if your previous API expected it
-        return JSONResponse(content=result)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="doc_id not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        stored = get_stored_doc(req.doc_id)
+    except Exception:
+        stored = STORE.get(req.doc_id) if isinstance(STORE, dict) else None
+
+    if not stored:
+        raise HTTPException(status_code=404, detail=f"doc_id {req.doc_id} not found")
+
+    # Try candidate_json from stored doc (preferred)
+    candidate_json = stored.get("candidate_json") or stored.get("features") or stored.get("extracted") or {}
+
+    # If candidate_json is empty, attempt on-the-fly feature extraction from stored sections
+    if not candidate_json:
+        try:
+            # import inside function to avoid top-level cycles
+            from src.phases.feature_extraction.main import extract_features_from_sectioned
+            # adapter helper to map extractor output to simplified candidate_json
+            from src.api.services.resume_service import _features_to_candidate_json
+
+            sections = stored.get("sections") or {}
+            sectioned_input = {
+                "sections": sections,
+                "full_text": stored.get("full_text", ""),
+                "source": "resume_store_fallback"
+            }
+            features_extracted = extract_features_from_sectioned(sectioned_input) or {}
+            candidate_json = _features_to_candidate_json(features_extracted) or {}
+
+            # try to persist these back into stored doc for faster next calls
+            try:
+                if isinstance(STORE, dict):
+                    stored["features"] = features_extracted
+                    stored["candidate_json"] = candidate_json
+                    STORE[req.doc_id] = stored
+                else:
+                    # If STORE has a save API, try to call it (best-effort)
+                    save_fn = globals().get("save_doc") or globals().get("store_doc")
+                    if callable(save_fn):
+                        save_fn(req.doc_id, {"features": features_extracted, "candidate_json": candidate_json})
+            except Exception:
+                # non-fatal persistence failure
+                _logger = globals().get("logger")
+                if _logger:
+                    _logger.warning("Could not persist extracted candidate_json for doc_id %s", req.doc_id)
+        except Exception:
+            # If extraction fails, leave candidate_json empty (scorer will handle gracefully)
+            candidate_json = {}
+
+    # Ensure we have job description
+    job_description = req.job_description if hasattr(req, "job_description") else None
+    if not job_description:
+        raise HTTPException(status_code=400, detail="job_description is required")
+
+    # Call scorer
+    try:
+        from src.phases.scoring.helpers.scorer import score_candidate
+        # allow passing profile / alpha / beta from request if present
+        profile = getattr(req, "profile", None)
+        score_result = score_candidate(candidate_json, job_description)
+        # include doc_id in the response for traceability
+        score_result["doc_id"] = req.doc_id
+        return JSONResponse(content=score_result)
+    except Exception as sc_exc:
+        raise HTTPException(status_code=500, detail=f"Scoring failed: {str(sc_exc)}")
 
 
 # ---------------------------
