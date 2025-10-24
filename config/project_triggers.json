@@ -1,357 +1,90 @@
 {
-  "version": "1.0",
-  "last_updated": "2025-08-16",
-  "notes": "Trigger phrases and regex patterns to detect context sentences/lines for projects, research, competitions, open-source, volunteering, achievements, internships, and DSA milestones. Used by Phase 4.5 project_extractor.",
-  "extraction_config": {
-    "sentence_delimiters": [".", "!", "?", ";", "•", "▪", "‣", "–", "-"],
-    "capture_window": {
-      "sentences_before": 0,
-      "sentences_after": 0,
-      "max_chars": 320
-    },
-    "merge_bullets_across_lines": true,
-    "min_chars_per_item": 25,
-    "max_items_per_section": 30
-  },
   "section_headers": {
+    "experience": [
+      "experience",
+      "work experience",
+      "employment",
+      "professional experience"
+    ],
     "projects": [
       "projects",
-      "academic projects",
+      "project",
       "personal projects",
-      "coursework projects",
-      "major project",
-      "minor project",
-      "final year project",
-      "capstone"
+      "academic projects"
     ],
-    "research": [
-      "research",
-      "publications",
-      "papers",
-      "journals",
-      "conferences",
-      "thesis",
-      "dissertation"
+    "education": [
+      "education",
+      "academic",
+      "qualifications"
     ],
-    "competitions": [
-      "competitions",
-      "contests",
-      "hackathons",
-      "datathons",
-      "challenges"
+    "skills": [
+      "skills",
+      "technical skills",
+      "programming languages"
+    ],
+    "certifications": [
+      "certificates",
+      "certifications"
     ],
     "open_source": [
       "open source",
-      "open-source",
-      "oss contributions",
-      "github contributions",
-      "gsoc"
+      "github",
+      "contributions"
     ],
-    "volunteering": [
-      "volunteering",
-      "volunteer experience",
-      "community",
-      "outreach",
-      "leadership"
-    ],
-    "achievements": [
-      "achievements",
-      "awards",
-      "honors",
-      "recognitions",
-      "scholarships",
-      "fellowships"
-    ],
-    "internships": [
-      "internships",
-      "industrial training",
-      "apprenticeship",
-      "training"
-    ],
-    "dsa": [
-      "competitive programming",
-      "problem solving",
-      "coding profile",
-      "dsa"
+    "references": [
+      "references",
+      "referee",
+      "references available",
+      "references on request"
     ]
   },
-  "triggers": {
-    "projects": {
+  "project_triggers": [
+    {
       "keywords": [
-        "project",
-        "capstone",
-        "thesis",
-        "dissertation",
-        "prototype",
-        "proof of concept",
-        "poc",
-        "mvp",
-        "case study",
-        "coursework project",
-        "semester project",
-        "internship project",
-        "final year project",
-        "minor project",
-        "major project",
-        "system",
-        "application",
-        "platform",
-        "service",
-        "pipeline",
-        "dashboard",
-        "api",
-        "model"
-      ],
-      "verbs": [
-        "built",
-        "developed",
-        "implemented",
+        "develop",
         "designed",
-        "engineered",
+        "implemented",
+        "built",
         "created",
-        "deployed",
-        "optimized",
-        "refactored",
-        "automated",
-        "integrated",
-        "migrated",
-        "fine-tuned",
-        "trained",
-        "evaluated",
-        "benchmarked",
-        "scaled",
-        "containerized"
+        "engineer"
       ],
-      "regex": [
-        "\\b(project|capstone|thesis|dissertation)\\b.*",
-        "\\b(built|developed|implemented|designed|engineered|created|deployed|optimized|refactored|integrated|trained)\\b.+"
-      ]
+      "confidence_boost": 0.2
     },
-    "research": {
+    {
       "keywords": [
-        "research",
-        "publication",
-        "paper",
-        "journal",
-        "conference",
-        "workshop",
-        "symposium",
-        "proceedings",
-        "preprint",
-        "arxiv",
-        "doi",
-        "citation",
-        "impact factor",
-        "literature review",
-        "hypothesis",
-        "experiment",
-        "dataset"
+        "lead",
+        "led",
+        "managed"
       ],
-      "publishers": [
-        "ieee",
-        "acm",
-        "springer",
-        "elsevier",
-        "wiley",
-        "taylor & francis",
-        "nature",
-        "science",
-        "scopus",
-        "web of science"
-      ],
-      "verbs": [
-        "proposed",
-        "investigated",
-        "analyzed",
-        "modeled",
-        "derived",
-        "validated",
-        "evaluated",
-        "published",
-        "accepted"
-      ],
-      "regex": [
-        "\\b(published|accepted)\\b.+\\b(journal|conference|workshop|symposium|ieee|acm|springer|elsevier|wiley|nature|arxiv)\\b.*",
-        ".*\\b(doi|arxiv)\\b[:/\\w\\.-]+.*"
-      ]
+      "confidence_boost": 0.15
     },
-    "competitions": {
+    {
       "keywords": [
-        "hackathon",
-        "codeathon",
-        "datathon",
-        "kaggle",
-        "codeforces",
-        "leetcode",
-        "codechef",
-        "hackerrank",
-        "spoj",
-        "icpc",
-        "google code jam",
-        "kick start",
-        "facebook hacker cup",
-        "topcoder",
-        "atcoder",
-        "smart india hackathon",
-        "sih"
-      ],
-      "ranking_words": [
-        "rank",
-        "global rank",
-        "leaderboard",
-        "finalist",
-        "winner",
-        "runner-up",
-        "top",
-        "division 1",
-        "division 2"
-      ],
-      "regex": [
-        ".*\\b(hackathon|kaggle|codeforces|leetcode|icpc|codechef|hackerrank|topcoder|atcoder|smart india hackathon|sih)\\b.*",
-        ".*\\b(rank|leaderboard|finalist|winner|runner-up|top\\s?\\d+%?)\\b.*"
-      ]
-    },
-    "open_source": {
-      "keywords": [
-        "open source",
-        "open-source",
-        "oss",
-        "github",
-        "gitlab",
-        "bitbucket",
-        "maintainer",
-        "contributor",
-        "commit",
-        "pull request",
-        "pr",
-        "merge request",
-        "issue triage",
-        "gsoc",
-        "google summer of code",
-        "apache foundation",
-        "cncf"
-      ],
-      "verbs": [
         "contributed",
-        "maintained",
-        "opened",
-        "reviewed",
-        "merged",
-        "refactored"
+        "pull request",
+        "pull-request",
+        "pr",
+        "merged"
       ],
-      "regex": [
-        ".*\\b(open source|open-source|oss|github|gitlab|bitbucket|pull request|merge request|gsoc|google summer of code)\\b.*"
-      ]
-    },
-    "volunteering": {
-      "keywords": [
-        "volunteer",
-        "volunteering",
-        "ngo",
-        "non-profit",
-        "community",
-        "outreach",
-        "organizer",
-        "mentor",
-        "mentorship",
-        "tutor",
-        "workshop",
-        "speaker",
-        "meetup",
-        "chapter lead",
-        "club president",
-        "coordinator"
-      ],
-      "regex": [
-        ".*\\b(volunteer|ment(or|orship)|organizer|ngo|community|workshop|speaker|meetup)\\b.*"
-      ]
-    },
-    "achievements": {
-      "keywords": [
-        "achievement",
-        "award",
-        "honor",
-        "recognition",
-        "scholarship",
-        "fellowship",
-        "grant",
-        "patent",
-        "gold medal",
-        "silver medal",
-        "bronze medal",
-        "distinction",
-        "with honors"
-      ],
-      "regex": [
-        ".*\\b(award|winner|finalist|runner-up|scholarship|fellowship|grant|patent|distinction|with honors)\\b.*"
-      ]
-    },
-    "internships": {
-      "keywords": [
-        "internship",
-        "intern",
-        "industrial training",
-        "in-plant training",
-        "ipt",
-        "apprentice",
-        "apprenticeship",
-        "trainee"
-      ],
-      "regex": [
-        ".*\\b(internship|intern|industrial training|apprentice|apprenticeship|trainee)\\b.*"
-      ]
-    },
-    "dsa": {
-      "keywords": [
-        "leetcode",
-        "codeforces",
-        "codechef",
-        "hackerrank",
-        "spoj",
-        "geeksforgeeks",
-        "gfg",
-        "competitive programming",
-        "problem solving"
-      ],
-      "milestones": [
-        "problems solved",
-        "questions solved",
-        "streak",
-        "rating",
-        "stars",
-        "max rating",
-        "contest"
-      ],
-      "regex": [
-        ".*\\b(leetcode|codeforces|codechef|hackerrank|spoj|geeksforgeeks|gfg)\\b.*",
-        ".*\\b(\\d+\\+?\\s?(problems|questions)\\s?solved|rating\\s?\\d+|\\d+\\s?stars)\\b.*"
-      ]
+      "confidence_boost": 0.25
     }
-  },
-  "normalization_aliases": {
-    "sih": "smart india hackathon",
-    "pr": "pull request",
-    "oss": "open source",
-    "gfg": "geeksforgeeks",
-    "gsoc": "google summer of code",
-    "mvp": "minimum viable product",
-    "poc": "proof of concept"
-  },
-  "confidence_boost": {
-    "projects": 0.15,
-    "research": 0.2,
-    "competitions": 0.15,
-    "open_source": 0.15,
-    "volunteering": 0.05,
-    "achievements": 0.15,
-    "internships": 0.1,
-    "dsa": 0.08
-  },
+  ],
+  "role_terms": [
+    "developer",
+    "engineer",
+    "data scientist",
+    "analyst",
+    "full stack",
+    "backend",
+    "frontend",
+    "mobile",
+    "ml engineer"
+  ],
   "negation_patterns": [
-    "seeking (hackathon|internship)",
-    "interested in (research|hackathon|open source)",
-    "looking to participate",
-    "planned project",
-    "proposal only"
+    "interested in",
+    "looking to learn",
+    "aspiring",
+    "want to learn",
+    "willing to learn"
   ]
 }

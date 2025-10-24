@@ -1,30 +1,49 @@
 {
-    "description": "Profile base weights per role. Each role maps feature->base_weight (should sum to 1 or will be normalized).",
-    "roles": {
+    "profiles": {
         "developer": {
-            "projects": 0.35,
-            "open_source": 0.20,
-            "skills": 0.25,
-            "experience": 0.15,
-            "education": 0.03,
-            "research_papers": 0.02
-        },
-        "researcher": {
-            "projects": 0.10,
+            "skills": 0.35,
+            "projects": 0.25,
+            "experience": 0.2,
+            "education": 0.05,
+            "certifications": 0.05,
             "open_source": 0.05,
-            "skills": 0.15,
-            "experience": 0.10,
-            "education": 0.10,
-            "research_papers": 0.50
+            "research": 0.05
+        },
+        "data_scientist": {
+            "skills": 0.3,
+            "projects": 0.2,
+            "experience": 0.2,
+            "education": 0.05,
+            "certifications": 0.1,
+            "open_source": 0.075,
+            "research": 0.075
+        },
+        "research": {
+            "skills": 0.2,
+            "projects": 0.15,
+            "experience": 0.1,
+            "education": 0.1,
+            "certifications": 0.05,
+            "open_source": 0.1,
+            "research": 0.3
         },
         "analyst": {
-            "projects": 0.15,
+            "skills": 0.3,
+            "projects": 0.2,
+            "experience": 0.2,
+            "education": 0.1,
+            "certifications": 0.1,
             "open_source": 0.05,
-            "skills": 0.30,
-            "experience": 0.30,
-            "education": 0.10,
-            "research_papers": 0.10
+            "research": 0.05
+        },
+        "fresher": {
+            "skills": 0.25,
+            "projects": 0.3,
+            "experience": 0.05,
+            "education": 0.2,
+            "certifications": 0.1,
+            "open_source": 0.05,
+            "research": 0.05
         }
-    },
-    "default_role": "developer"
+    }
 }

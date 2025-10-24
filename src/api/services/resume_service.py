@@ -1,4 +1,4 @@
-#src/api/services/resume_service.py
+# src/api/services/resume_service.py
 """
 Resume service - orchestration layer.
 Added batch scoring helpers: score_batch_by_doc_ids and process_and_score_files_batch.
@@ -53,7 +53,10 @@ def process_pdf(path: str, persist: bool = True) -> Dict[str, Any]:
       - sections (heuristic)
       - sentences (list)
       - tokenized (for bm25: list[list[str]])
+      - features (raw extractor output)  <-- NEW
+      - candidate_json (simplified, scorer-friendly) <-- NEW
     """
+    # Ingest raw text & pages
     ingested = extract_pdf_text(path)  # {"full_text", "pages", "page_blocks"}
     full_text = ingested.get("full_text", "")
     pages = ingested.get("pages", [])
@@ -66,6 +69,42 @@ def process_pdf(path: str, persist: bool = True) -> Dict[str, Any]:
     sentences = sentences_from_text(full_text)
     tokenized = preprocess_for_bm25(full_text)
 
+    # Prepare placeholders for features/candidate_json
+    features_extracted = {}
+    candidate_json = {}
+
+    # ---------------------------
+    # NEW: run feature extraction and produce simplified candidate_json
+    # ---------------------------
+    try:
+        # import here to avoid import cycles at module import time
+        from src.phases.feature_extraction.main import extract_features_from_sectioned
+        # Build input for extractor — include sections/sentences/full_text
+        sectioned_input = {
+            "sections": sections,
+            "sentences": sentences,
+            "full_text": full_text,
+            "source": "resume_pdf"
+        }
+        # Run feature extractor (it typically returns a dict with 'features' key)
+        features_extracted = extract_features_from_sectioned(sectioned_input) or {}
+        # Map to simplified candidate_json that scorer expects
+        # _features_to_candidate_json should be defined in this module (or import from helper)
+        candidate_json = _features_to_candidate_json(features_extracted)
+    except Exception as _ex:
+        # If extraction fails, keep candidate_json empty but don't crash the pipeline
+        features_extracted = features_extracted or {}
+        candidate_json = candidate_json or {}
+        # Try to log the exception if a logger is available
+        try:
+            _logger = globals().get("logger")
+            if _logger:
+                _logger.warning("Feature extraction failed for %s: %s", path, str(_ex))
+        except Exception:
+            pass
+    # ---------------------------
+
+    # Create new doc_id and result
     doc_id = str(uuid.uuid4())
     result = {
         "doc_id": doc_id,
@@ -76,10 +115,28 @@ def process_pdf(path: str, persist: bool = True) -> Dict[str, Any]:
         "sections": sections,
         "sentences": sentences,
         "tokenized": tokenized,
+        # persisted extractor outputs for later scoring
+        "features": features_extracted,
+        "candidate_json": candidate_json,
     }
 
     if persist:
-        STORE[doc_id] = result
+        try:
+            STORE[doc_id] = result
+        except Exception:
+            # fallback if STORE is a custom interface (not a plain dict) — try to call set/save method
+            try:
+                save_fn = globals().get("save_doc") or globals().get("store_doc")
+                if callable(save_fn):
+                    save_fn(doc_id, result)
+                else:
+                    # last-resort: ignore persistence failure but inform via logger if present
+                    _logger = globals().get("logger")
+                    if _logger:
+                        _logger.warning("Failed to persist processed doc to STORE for %s", doc_id)
+            except Exception:
+                pass
+
     return result
 
 
@@ -246,3 +303,143 @@ def process_and_score_files_batch(
         except Exception as e:
             errors.append({"filename": filename, "error": str(e)})
     return {"results": results, "errors": errors, "count": len(results)}
+
+
+def _features_to_candidate_json(feature_extracted: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map the feature extractor output (feature_extracted) to the simplified candidate_json
+    expected by the scorer. Defensive: works with several extractor output shapes.
+
+    Returns a dict with keys:
+      - skills: List[str]
+      - projects: List[{"title": str, "summary": str}]
+      - experience: List[str]
+      - education: List[str]
+      - certifications: List[str]
+      - open_source: List[str]
+    """
+    cand: Dict[str, Any] = {}
+    feat = (
+        feature_extracted.get("features", {})
+        if isinstance(feature_extracted, dict)
+        else {}
+    )
+
+    # SKILLS
+    skills: List[str] = []
+    skills_dict = feat.get("skills", {}) or {}
+    # skills_dict might be {"technical": [...], "soft": [...]} or a flat list
+    if isinstance(skills_dict, dict):
+        for subcat, items in skills_dict.items():
+            if not items:
+                continue
+            for it in items:
+                if isinstance(it, dict):
+                    name = it.get("name") or it.get("skill") or it.get("title") or ""
+                else:
+                    name = str(it)
+                if name:
+                    skills.append(name)
+    else:
+        # if skills_dict is a list
+        for it in skills_dict or []:
+            skills.append(it.get("name") if isinstance(it, dict) else str(it))
+
+    cand["skills"] = skills
+
+    # PROJECTS
+    projects_list: List[Dict[str, str]] = []
+    projects_block = feat.get("projects", {}) or {}
+    possible_projects = (
+        projects_block.get("projects") or projects_block.get("project_list") or []
+    )
+    # If extractor places projects at top level
+    if not possible_projects and isinstance(feat.get("projects"), list):
+        possible_projects = feat.get("projects")
+
+    for p in possible_projects or []:
+        if isinstance(p, dict):
+            title = (
+                p.get("title")
+                or p.get("name")
+                or (p.get("summary")[:60] if p.get("summary") else "")
+            )
+            summary = (
+                p.get("summary") or p.get("description") or p.get("evidence") or ""
+            )
+            projects_list.append({"title": title, "summary": summary})
+        else:
+            projects_list.append({"title": str(p)[:80], "summary": ""})
+    cand["projects"] = projects_list
+
+    # EXPERIENCE
+    exp_list: List[str] = []
+    exp_block = feat.get("experience", {}) or {}
+    possible_exps = exp_block.get("experience") or exp_block.get("positions") or []
+    # fallback if extractor stores a list in feat['work_experience'] or similar
+    if not possible_exps:
+        possible_exps = feat.get("work_experience") or feat.get("roles") or []
+
+    for e in possible_exps or []:
+        if isinstance(e, dict):
+            # try to produce a readable summary
+            summary = (
+                e.get("summary")
+                or e.get("description")
+                or e.get("role")
+                or e.get("company")
+                or str(e)
+            )
+            exp_list.append(summary)
+        else:
+            exp_list.append(str(e))
+    cand["experience"] = exp_list
+
+    # EDUCATION
+    edu_list: List[str] = []
+    edu_block = feat.get("education", {}) or {}
+    possible_edu = edu_block.get("education") or feat.get("education") or []
+    for e in possible_edu or []:
+        if isinstance(e, dict):
+            degree = e.get("degree") or e.get("degree_name") or e.get("name") or str(e)
+            edu_list.append(degree)
+        else:
+            edu_list.append(str(e))
+    cand["education"] = edu_list
+
+    # CERTIFICATIONS
+    certs: List[str] = []
+    cert_block = feat.get("certifications", {}) or {}
+    cert_items = cert_block.get("certifications") or feat.get("certifications") or []
+    for c in cert_items or []:
+        if isinstance(c, dict):
+            certs.append(
+                c.get("certificate_title") or c.get("title") or c.get("name") or str(c)
+            )
+        else:
+            certs.append(str(c))
+    cand["certifications"] = certs
+
+    # OPEN SOURCE / RESEARCH
+    os_list: List[str] = []
+    os_block = feat.get("open_source", {}) or {}
+    os_items = (
+        os_block.get("open_source")
+        or feat.get("open_source")
+        or feat.get("projects", [])
+    )
+    for it in os_items or []:
+        if isinstance(it, dict):
+            os_list.append(
+                it.get("summary") or it.get("title") or it.get("name") or str(it)
+            )
+        else:
+            os_list.append(str(it))
+    cand["open_source"] = os_list
+
+    return cand
+
+
+# ---------------------------
+# End helper
+# ---------------------------
