@@ -58,11 +58,12 @@ PARENT_CATEGORY_WEIGHTS = {
 
 BLOCK_JOINER = "\n\n"
 
-def _load_skill_dict():
-    p = "config/hiresense_skills_dictionary_v2.json"
+def _load_skill_dict(skill_dict_path = "config/hiresense_skills_dictionary_v2.json"):
+    p = Path(skill_dict_path) if not isinstance(skill_dict_path, Path) else skill_dict_path
     try:
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
+        with p.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data
     except Exception:
         logger.exception("Failed to load hiresense_skills_dictionary_v2.json")
     # fallback minimal mapping
