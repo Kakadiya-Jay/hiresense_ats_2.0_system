@@ -23,7 +23,7 @@ from src.api.services.resume_service import (
     score_resume,
     score_batch_by_doc_ids,
     process_and_score_files_batch,
-    STORE
+    STORE,
 )
 
 from src.phases.scoring.helpers.scorer import score_candidate
@@ -85,27 +85,27 @@ class ScoreRequest(BaseModel):
     top_k: Optional[int] = 5
 
 
+from src.api.services.resume_service import _features_to_candidate_json
+
+
 @router.post("/score_resume")
 def score_resume_route(req: ScoreRequest):
     """
-    Score a processed resume by doc_id.
+    Robust score_resume handler.
 
-    Expected request body (ScoreRequest):
-      - doc_id: str
-      - job_description: str
-      - required_keywords: Optional[str]
-      - top_k: Optional[int]
-
-    Behavior:
-      - Fetch the stored processed doc by doc_id.
-      - Use stored['candidate_json'] if present; else try stored['features'].
-      - If still missing, run feature extractor on stored['sections'] (on-the-fly fallback),
-        map to candidate_json and persist back to store for future calls.
-      - Call score_candidate(...) and return result JSON (includes doc_id).
+    Behavior (improved):
+      - Fetch stored processed doc by doc_id (via get_stored_doc / STORE).
+      - If stored candidate_json/features empty:
+          1) If stored contains 'path' to the saved PDF -> re-run process_pdf(path, persist=True)
+             (this re-run is the most robust way to re-generate features exactly how process_resume does)
+          2) Else, try extract_features_from_sectioned on stored['sections'] (fallback)
+      - After regeneration attempt, if candidate_json still empty -> return helpful HTTP 422 with debug
+      - If candidate_json present -> call score_candidate(...) and return result (with doc_id + debug appended)
     """
     # Validate and fetch stored document
     if not req.doc_id:
         raise HTTPException(status_code=400, detail="doc_id is required")
+
     # Try to fetch via get_stored_doc if available; else fallback to STORE dict
     try:
         stored = get_stored_doc(req.doc_id)
@@ -115,45 +115,111 @@ def score_resume_route(req: ScoreRequest):
     if not stored:
         raise HTTPException(status_code=404, detail=f"doc_id {req.doc_id} not found")
 
+    debug_msgs = []
     # Try candidate_json from stored doc (preferred)
-    candidate_json = stored.get("candidate_json") or stored.get("features") or stored.get("extracted") or {}
+    candidate_json = stored.get("candidate_json") or {}
+    features_block = stored.get("features") or {}
 
-    # If candidate_json is empty, attempt on-the-fly feature extraction from stored sections
+    if candidate_json:
+        debug_msgs.append("Found candidate_json in stored doc (using existing).")
+    elif features_block:
+        # convert features -> candidate_json using helper
+        try:
+            candidate_json = _features_to_candidate_json(features_block)
+            if candidate_json:
+                debug_msgs.append("Converted stored 'features' -> 'candidate_json'.")
+                # persist back for next calls
+                try:
+                    stored["candidate_json"] = candidate_json
+                    if isinstance(STORE, dict):
+                        STORE[req.doc_id] = stored
+                except Exception:
+                    debug_msgs.append(
+                        "Could not persist candidate_json back into STORE (non-fatal)."
+                    )
+        except Exception as e:
+            debug_msgs.append(f"Conversion features->candidate_json failed: {e}")
+            candidate_json = {}
+
+    # If still empty, try reprocessing from saved file path (most reliable)
+    if not candidate_json:
+        saved_path = stored.get("path") or stored.get("file_path") or None
+        if saved_path:
+            try:
+                debug_msgs.append(
+                    "candidate_json missing: re-running process_pdf on saved file path to regenerate features."
+                )
+                # Re-run full processing. persist=True ensures STORE is updated with regenerated output
+                reproc = process_pdf(saved_path, persist=True)
+                # update stored reference to new result
+                stored = reproc or stored
+                candidate_json = stored.get("candidate_json") or {}
+                if candidate_json:
+                    debug_msgs.append(
+                        "Reprocessing succeeded and candidate_json regenerated from PDF."
+                    )
+                else:
+                    debug_msgs.append(
+                        "Reprocessing completed but candidate_json still empty."
+                    )
+            except Exception as e:
+                debug_msgs.append(f"Reprocessing via process_pdf failed: {e}")
+
+    # If still empty, fall back to extracting from 'sections' using extractor (lightweight)
     if not candidate_json:
         try:
-            # import inside function to avoid top-level cycles
-            from src.phases.feature_extraction.main import extract_features_from_sectioned
-            # adapter helper to map extractor output to simplified candidate_json
-            from src.api.services.resume_service import _features_to_candidate_json
+            # import here to avoid top-level cycles
+            from src.phases.feature_extraction.main import (
+                extract_features_from_sectioned,
+            )
 
             sections = stored.get("sections") or {}
-            sectioned_input = {
-                "sections": sections,
-                "full_text": stored.get("full_text", ""),
-                "source": "resume_store_fallback"
-            }
-            features_extracted = extract_features_from_sectioned(sectioned_input) or {}
-            candidate_json = _features_to_candidate_json(features_extracted) or {}
+            if sections:
+                debug_msgs.append(
+                    "candidate_json missing: attempting extract_features_from_sectioned(sections) as fallback."
+                )
+                try:
+                    features_extracted = extract_features_from_sectioned(
+                        {"sections": sections}
+                    )
+                    candidate_json = (
+                        _features_to_candidate_json(features_extracted) or {}
+                    )
+                    if candidate_json:
+                        debug_msgs.append(
+                            "Fallback extractor returned candidate_json via sections."
+                        )
+                        # persist back for future calls
+                        stored["features"] = features_extracted
+                        stored["candidate_json"] = candidate_json
+                        if isinstance(STORE, dict):
+                            STORE[req.doc_id] = stored
+                    else:
+                        debug_msgs.append(
+                            "Fallback extractor returned no candidate_json (empty)."
+                        )
+                except Exception as e:
+                    debug_msgs.append(f"extract_features_from_sectioned failed: {e}")
+            else:
+                debug_msgs.append(
+                    "No 'sections' available in stored doc; cannot run fallback extractor."
+                )
+        except Exception as import_exc:
+            debug_msgs.append(f"Could not import extractor fallback: {import_exc}")
 
-            # try to persist these back into stored doc for faster next calls
-            try:
-                if isinstance(STORE, dict):
-                    stored["features"] = features_extracted
-                    stored["candidate_json"] = candidate_json
-                    STORE[req.doc_id] = stored
-                else:
-                    # If STORE has a save API, try to call it (best-effort)
-                    save_fn = globals().get("save_doc") or globals().get("store_doc")
-                    if callable(save_fn):
-                        save_fn(req.doc_id, {"features": features_extracted, "candidate_json": candidate_json})
-            except Exception:
-                # non-fatal persistence failure
-                _logger = globals().get("logger")
-                if _logger:
-                    _logger.warning("Could not persist extracted candidate_json for doc_id %s", req.doc_id)
-        except Exception:
-            # If extraction fails, leave candidate_json empty (scorer will handle gracefully)
-            candidate_json = {}
+    # After all attempts, if candidate_json still empty return informative response (422)
+    if not candidate_json or (
+        isinstance(candidate_json, dict)
+        and all((not v) for v in candidate_json.values())
+    ):
+        # attach debug info for troubleshooting
+        explanation = {
+            "detail": "No candidate features found after regeneration attempts.",
+            "debug": debug_msgs,
+            "note": "Ensure process_resume persisted 'candidate_json' and 'features' to STORE[doc_id], or that the saved file still exists at stored['path'].",
+        }
+        # Instead of returning zero-scores silently, return 422 to force caller to inspect extraction step
+        raise HTTPException(status_code=422, detail=explanation)
 
     # Ensure we have job description
     job_description = req.job_description if hasattr(req, "job_description") else None
@@ -162,15 +228,29 @@ def score_resume_route(req: ScoreRequest):
 
     # Call scorer
     try:
-        from src.phases.scoring.helpers.scorer import score_candidate
-        # allow passing profile / alpha / beta from request if present
-        profile = getattr(req, "profile", None)
-        score_result = score_candidate(candidate_json, job_description)
-        # include doc_id in the response for traceability
+        from src.phases.scoring.helpers.scorer import score_candidate as scorer_fn
+
+        score_result = scorer_fn(candidate_json, job_description)
+        # include doc_id and debug info in the response for traceability
         score_result["doc_id"] = req.doc_id
+        score_result.setdefault("debug", [])
+        # append our handler debug messages (non-sensitive)
+        score_result["debug"].extend(debug_msgs)
+        # persist final scored snapshot back to STORE for audit if desired
+        try:
+            stored.setdefault("last_score", {})["snapshot"] = score_result
+            if isinstance(STORE, dict):
+                STORE[req.doc_id] = stored
+        except Exception:
+            # non-fatal
+            pass
         return JSONResponse(content=score_result)
     except Exception as sc_exc:
-        raise HTTPException(status_code=500, detail=f"Scoring failed: {str(sc_exc)}")
+        # return an explanatory error so you can see stacktrace during dev
+        tb = traceback.format_exc()
+        raise HTTPException(
+            status_code=500, detail=f"Scoring failed: {str(sc_exc)}\n{tb}"
+        )
 
 
 # ---------------------------
