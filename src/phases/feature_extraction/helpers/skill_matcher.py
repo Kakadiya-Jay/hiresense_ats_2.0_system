@@ -296,3 +296,196 @@ def score_candidate(
         "profile": profile_name,
         "doc_id": candidate_json.get("doc_id", ""),
     }
+
+
+from typing import List, Dict, Iterable, Any, Optional
+import re
+from difflib import SequenceMatcher
+import os
+import json
+import logging
+import unicodedata
+
+logger = logging.getLogger(__name__)
+
+# Try to import rapidfuzz for better fuzzy matching; fallback to difflib
+try:
+    from rapidfuzz import fuzz, process  # type: ignore
+
+    HAS_RAPIDFUZZ = True
+except Exception:
+    HAS_RAPIDFUZZ = False
+
+SKILL_DICTIONARY_PATH = os.environ.get(
+    "HIRESENSE_SKILL_DICT", "config/hiresense_skills_dictionary_v2.json"
+)
+
+
+def _load_skill_dictionary(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            dj = json.load(fh)
+            if isinstance(dj, dict) and "skills" in dj:
+                flattened = []
+                for k, v in dj["skills"].items():
+                    if isinstance(v, list):
+                        flattened.extend([str(x).strip() for x in v if x])
+                    elif isinstance(v, str):
+                        flattened.append(v.strip())
+                # dedupe while preserving order
+                return list(dict.fromkeys(flattened))
+            if isinstance(dj, list):
+                return dj
+    except FileNotFoundError:
+        logger.debug("Skill dictionary not found at %s - using builtin list", path)
+    except Exception as e:
+        logger.exception("Failed to load skill dictionary %s: %s", path, e)
+    # fallback minimal set
+    return [
+        "python",
+        "java",
+        "c++",
+        "javascript",
+        "react",
+        "nodejs",
+        "docker",
+        "kubernetes",
+        "pytorch",
+        "tensorflow",
+        "scikit-learn",
+        "pandas",
+        "sql",
+        "aws",
+        "gcp",
+    ]
+
+
+CANONICAL_SKILLS = _load_skill_dictionary(SKILL_DICTIONARY_PATH)
+
+
+def _safe_normalize_candidates(candidates: Iterable) -> List[str]:
+    out = []
+    seen = set()
+    for c in candidates or []:
+        if c is None:
+            continue
+        s = str(c).strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low not in seen:
+            seen.add(low)
+            out.append(s)
+    return out
+
+
+def _clean_candidate_text(s: str) -> str:
+    """
+    Normalize a candidate string for matching (remove urls, bullets, weird punctuation).
+    """
+    if not s:
+        return ""
+    t = str(s)
+    t = unicodedata.normalize("NFKC", t)
+    t = re.sub(r"[\u200B\u200C\u200D\uFEFF]", " ", t)
+    t = re.sub(r"[\u2022\u2023\u25CF\u25AA\u25AB●•◦]", " ", t)
+    t = re.sub(r"\|+", " ", t)
+    t = re.sub(r"\(https?://[^\)]+\)", " ", t)
+    t = re.sub(r"https?://\S+", " ", t)
+    t = t.strip(" \t\n\r-–—:;,.")
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
+def _similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100.0
+
+
+def dict_and_fuzzy_match(
+    candidates: List[str],
+    canonical_skills: Optional[Iterable[str]] = None,
+    fuzzy_threshold: float = 65.0,
+) -> List[Dict[str, Any]]:
+    """
+    Match candidates to canonical skill names.
+
+    Returns a list of dicts:
+      { "candidate": raw_candidate, "matched": canonical_or_none, "score": float(0..100), "method": "exact|fuzzy|fallback|none" }
+    """
+    canonical = (
+        list(canonical_skills) if canonical_skills is not None else CANONICAL_SKILLS
+    )
+    canonical_clean = [unicodedata.normalize("NFKC", str(c)).strip() for c in canonical]
+
+    out = []
+    normalized_inputs = _safe_normalize_candidates(candidates)
+
+    for raw in normalized_inputs:
+        cleaned = _clean_candidate_text(raw)
+        if not cleaned:
+            continue
+        matched = None
+        score = 0.0
+        method = "none"
+
+        # exact
+        for can in canonical_clean:
+            if cleaned.lower() == can.lower():
+                matched = can
+                score = 100.0
+                method = "exact"
+                break
+
+        # fuzzy
+        if matched is None and canonical_clean:
+            best_match = None
+            best_score = 0.0
+            if HAS_RAPIDFUZZ:
+                try:
+                    res = process.extract(
+                        cleaned, canonical_clean, scorer=fuzz.WRatio, limit=1
+                    )
+                    if res and len(res) > 0:
+                        best_match, best_score, _ = res[0]
+                except Exception:
+                    best_match = None
+                    best_score = 0.0
+            else:
+                for can in canonical_clean:
+                    try:
+                        sim = _similarity(cleaned, can)
+                    except Exception:
+                        sim = 0.0
+                    if sim > best_score:
+                        best_score = sim
+                        best_match = can
+            if best_match and best_score >= float(fuzzy_threshold):
+                matched = best_match
+                score = float(best_score)
+                method = "fuzzy"
+            elif best_match:
+                matched = best_match
+                score = float(best_score)
+                method = "fallback"
+
+        out.append(
+            {
+                "candidate": raw,
+                "matched": matched,
+                "score": float(score),
+                "method": method,
+            }
+        )
+
+    return out
+
+
+# Backwards compat / explicit exports
+__all__ = [
+    "dict_and_fuzzy_match",
+    "_clean_candidate_text",
+    "_load_skill_dictionary",
+    "CANONICAL_SKILLS",
+]

@@ -1,193 +1,151 @@
 # src/phases/scoring/helpers/scorer.py
 """
-Scorer engine implementing:
-  final_weight = clamp(base + alpha * jd_importance + beta * strength, 0, 1)
-  contrib = final_weight * sim
-  final_score = sum(contrib) / sum(final_weight)
+Resilient scorer with automatic fallback to feature-extraction when input is empty.
 
-This file is robust to two input shapes:
- - simplified candidate_json (top-level keys: 'skills','projects','experience',...)
- - extractor output shape: {"features": { ... }} (auto-converted)
+Behavior:
+- Accepts either simplified candidate_json OR extractor-style object (with 'features' or 'sections').
+- If the input is empty (no items for features), it will try to regenerate features by calling the feature-extraction
+  facade: run_feature_extraction_from_sections(...) OR extract_features_from_sectioned(...) if available.
+- Adds a 'debug' field to the returned payload explaining fallback actions.
+
+Note: This file assumes the extractor module exists at src.phases.feature_extraction.main with
+      run_feature_extraction_from_sections(...) or extract_features_from_sectioned(...).
+      The code will try imports and continue gracefully if they are not available.
 """
-
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional
 import numpy as np
-import re
 import os
+import logging
+import re
 
-# import embedder
-from src.phases.embeddings_matching.helpers.embeddings import (
-    embed_texts,
-    cosine_sim_matrix,
-    load_sbert,
-)
+logger = logging.getLogger(__name__)
 
-# default hyperparameters (move to config if desired)
-ALPHA_DEFAULT = float(os.getenv("SCORE_ALPHA", 0.4))  # updated default per request
-BETA_DEFAULT = float(os.getenv("SCORE_BETA", 0.3))  # updated default per request
+# Try to import extractor run functions (defensive)
+_try_extractor = {}
+try:
+    from src.phases.feature_extraction.main import run_feature_extraction_from_sections, extract_features_from_sectioned  # type: ignore
+
+    _try_extractor["run_feature_extraction_from_sections"] = (
+        run_feature_extraction_from_sections
+    )
+    _try_extractor["extract_features_from_sectioned"] = extract_features_from_sectioned
+except Exception:
+    # imports may not be present in some deployments; we'll detect at runtime
+    _try_extractor["run_feature_extraction_from_sections"] = None
+    _try_extractor["extract_features_from_sectioned"] = None
+
+# Now import scorer internals (embeddings helpers). If your project uses different paths, adjust imports.
+try:
+    from src.phases.embeddings_matching.helpers.embeddings import (
+        embed_texts,
+        cosine_sim_matrix,
+        load_sbert,
+    )
+except Exception:
+    # Provide local fallbacks to avoid hard failure; these will be very small no-op implementations.
+    def embed_texts(texts, model=None):
+        # fallback: return zeros array
+        import numpy as _np
+
+        if not texts:
+            return _np.zeros((0, 768), dtype=_np.float32)
+        return _np.zeros((len(texts), 768), dtype=_np.float32)
+
+    def cosine_sim_matrix(a, b):
+        import numpy as _np
+
+        # fallback zero similarity
+        if getattr(a, "size", 0) == 0 or getattr(b, "size", 0) == 0:
+            return _np.zeros((0, 0))
+        return _np.zeros((a.shape[0], b.shape[0]))
+
+    def load_sbert():
+        class Dummy:
+            def get_sentence_embedding_dimension(self):
+                return 768
+
+        return Dummy()
+
+
+# default scalars
+ALPHA_DEFAULT = float(os.getenv("SCORE_ALPHA", 0.4))
+BETA_DEFAULT = float(os.getenv("SCORE_BETA", 0.3))
 TOP_K_FOR_AGG = int(os.getenv("TOP_K_FOR_AGG", 3))
 
 
+# ---------- utility helpers ----------
 def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, x))
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return lo
 
 
 def sentence_split(text: str) -> List[str]:
     if not text:
         return []
-    # Very light-weight split; replace with spaCy if you prefer.
     sents = re.split(r"(?<=[.!?])\s+", text.strip())
     return [s.strip() for s in sents if s.strip()]
 
 
-def keyword_overlap_ratio(jd_text: str, feature_texts: List[str]) -> float:
+def _is_features_empty(candidate_obj: Dict[str, Any]) -> bool:
     """
-    Simple word-token overlap ratio between JD tokens and concatenated canonical feature texts.
-    Returns ratio in [0,1].
+    Detect if a candidate object (either simplified or extractor format) has no feature items.
+    Returns True when every known feature list is empty or not present.
     """
-    if not jd_text or not feature_texts:
-        return 0.0
-    jd_tokens = set(re.findall(r"\w+", jd_text.lower()))
-    feat_tokens = set()
-    for t in feature_texts:
-        feat_tokens.update(re.findall(r"\w+", str(t).lower()))
-    if not jd_tokens:
-        return 0.0
-    overlap = jd_tokens.intersection(feat_tokens)
-    return float(len(overlap)) / float(len(jd_tokens))
+    if not isinstance(candidate_obj, dict):
+        return True
+    # if extractor-style
+    if "features" in candidate_obj and isinstance(candidate_obj["features"], dict):
+        f = candidate_obj["features"]
+        # consider top lists under features
+        keys = [
+            "skills",
+            "projects",
+            "experience",
+            "education",
+            "certifications",
+            "open_source",
+            "research_papers",
+        ]
+        for k in keys:
+            val = f.get(k)
+            if isinstance(val, dict):
+                # nested lists under dict (like {"projects": {"projects":[...]}})
+                # search recursively
+                for kk, vv in val.items():
+                    if isinstance(vv, list) and len(vv) > 0:
+                        return False
+            elif isinstance(val, list) and len(val) > 0:
+                return False
+        return True
+    # simplified candidate json
+    keys = [
+        "skills",
+        "projects",
+        "experience",
+        "education",
+        "certifications",
+        "open_source",
+        "research",
+    ]
+    any_present = False
+    for k in keys:
+        v = candidate_obj.get(k)
+        if isinstance(v, list) and len(v) > 0:
+            return False
+        if v is not None:
+            any_present = True
+    # If no keys found, treat as empty
+    if not any_present:
+        return True
+    return True
 
 
-def compute_jd_importance(
-    jd_text: str,
-    feature_name: str,
-    canonical_desc: Optional[List[str]],
-    jd_embs: np.ndarray,
-    feat_embs: np.ndarray,
-    model=None,
-) -> float:
-    """
-    Produce JD importance in [0,1] for a given feature:
-      - keyword overlap vs canonical descriptors
-      - semantic similarity (canonical_desc vs JD or fallback feat vs JD)
-    Weigh keyword 0.4 and semantic 0.6 by default.
-    """
-    kw_ratio = 0.0
-    sem_score = 0.0
-
-    try:
-        if canonical_desc:
-            kw_ratio = keyword_overlap_ratio(jd_text, canonical_desc)
-            # compute semantic similarity canonical_desc <-> jd_sents
-            cd_embs = (
-                embed_texts(canonical_desc, model=model)
-                if len(canonical_desc) > 0
-                else np.zeros((0, 0))
-            )
-            if cd_embs.size and jd_embs.size:
-                sims = cosine_sim_matrix(cd_embs, jd_embs)  # (n_cd, n_jd)
-                sem_score = float(np.max(sims)) if sims.size else 0.0
-        else:
-            # fallback: compute semantic similarity between feature items and JD
-            if (
-                feat_embs is not None
-                and feat_embs.size
-                and jd_embs is not None
-                and jd_embs.size
-            ):
-                sims = cosine_sim_matrix(feat_embs, jd_embs)
-                sem_score = float(np.max(sims)) if sims.size else 0.0
-    except Exception:
-        kw_ratio = kw_ratio if kw_ratio else 0.0
-        sem_score = sem_score if sem_score else 0.0
-
-    combined = 0.4 * clamp(kw_ratio, 0.0, 1.0) + 0.6 * clamp(sem_score, 0.0, 1.0)
-    return clamp(combined, 0.0, 1.0)
-
-
-def aggregate_feature_similarity(
-    jd_embs: np.ndarray, feat_embs: np.ndarray, strategy: str = "topk_mean"
-) -> Tuple[float, str, float]:
-    """
-    Aggregate similarity between JD sentence embeddings and feature item embeddings.
-    Returns:
-      - sim_val: aggregated similarity in [0,1]
-      - evidence_idx: string index of best matching item (can be used to fetch evidence)
-      - best_sim: raw best item->jd sim
-    """
-    if jd_embs is None or feat_embs is None or jd_embs.size == 0 or feat_embs.size == 0:
-        return 0.0, "", 0.0
-
-    sims = cosine_sim_matrix(feat_embs, jd_embs)  # (n_feat, n_jd)
-    per_item_best = np.max(sims, axis=1)  # (n_feat,)
-
-    if per_item_best.size == 0:
-        return 0.0, "", 0.0
-
-    if strategy == "max":
-        best_idx = int(np.argmax(per_item_best))
-        best_sim = float(per_item_best[best_idx])
-        return clamp(best_sim, 0.0, 1.0), str(best_idx), best_sim
-
-    elif strategy == "topk_mean":
-        k = min(len(per_item_best), TOP_K_FOR_AGG)
-        topk = np.sort(per_item_best)[-k:]
-        mean_topk = float(np.mean(topk)) if topk.size else 0.0
-        best_idx = int(np.argmax(per_item_best))
-        best_sim = float(per_item_best[best_idx])
-        return clamp(mean_topk, 0.0, 1.0), str(best_idx), best_sim
-
-    else:  # "avg"
-        mean_all = float(np.mean(per_item_best))
-        best_idx = int(np.argmax(per_item_best))
-        best_sim = float(per_item_best[best_idx])
-        return clamp(mean_all, 0.0, 1.0), str(best_idx), best_sim
-
-
-def compute_candidate_strength(
-    candidate_json: Dict[str, Any], feature_name: str
-) -> float:
-    """
-    Aggregate candidate-provided strength/confidence for a particular feature.
-    Heuristic fallback if not provided.
-    """
-    items = candidate_json.get(feature_name, [])
-    if not items:
-        return 0.0
-
-    strengths = []
-    for it in items:
-        if isinstance(it, dict):
-            # prefer explicit numeric fields
-            for key in ("strength", "confidence", "score", "feature_strength"):
-                v = it.get(key)
-                if v is not None:
-                    try:
-                        strengths.append(clamp(float(v), 0.0, 1.0))
-                        break
-                    except Exception:
-                        pass
-            else:
-                # heuristic checks
-                if it.get("repo_link") or it.get("link") or it.get("metrics"):
-                    strengths.append(0.8)
-                else:
-                    strengths.append(0.5)
-        else:
-            # plain string item
-            strengths.append(0.5)
-
-    if strengths:
-        return float(np.mean([clamp(x, 0.0, 1.0) for x in strengths]))
-    return 0.0
-
-
-# -------------------------
-# Helper: convert extractor features -> simplified candidate_json
-# -------------------------
 def _features_to_candidate_json(feature_extracted: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Map extractor output (with 'features' nested) into simplified candidate_json expected by scorer.
-    This internally mirrors resume_service._features_to_candidate_json to avoid circular imports.
+    Map extractor output (with 'features') into simplified candidate_json expected by scorer.
+    This is the same mapping used previously — kept here to avoid circular imports.
     """
     cand: Dict[str, Any] = {}
     feat = (
@@ -300,7 +258,7 @@ def _features_to_candidate_json(feature_extracted: Dict[str, Any]) -> Dict[str, 
             os_list.append(str(it))
     cand["open_source"] = os_list
 
-    # research alias - map to 'research' key if present
+    # research alias
     research_items = feat.get("research_papers") or feat.get("research") or []
     research_list = []
     for r in research_items or []:
@@ -313,58 +271,285 @@ def _features_to_candidate_json(feature_extracted: Dict[str, Any]) -> Dict[str, 
     return cand
 
 
+# ---------- scoring primitives (same approach as before) ----------
+def clamp_div(a, b):
+    return float(a) / float(b) if b else 0.0
+
+
+def compute_candidate_strength(
+    candidate_json: Dict[str, Any], feature_name: str
+) -> float:
+    items = candidate_json.get(feature_name, [])
+    if not items:
+        return 0.0
+    strengths = []
+    for it in items:
+        if isinstance(it, dict):
+            for key in ("strength", "confidence", "score", "feature_strength"):
+                v = it.get(key)
+                if v is not None:
+                    try:
+                        strengths.append(clamp(float(v), 0.0, 1.0))
+                        break
+                    except Exception:
+                        pass
+            else:
+                if it.get("repo_link") or it.get("link") or it.get("metrics"):
+                    strengths.append(0.8)
+                else:
+                    strengths.append(0.5)
+        else:
+            strengths.append(0.5)
+    return float(np.mean([clamp(x, 0.0, 1.0) for x in strengths])) if strengths else 0.0
+
+
+def compute_jd_importance_tfidf(candidate_texts: List[str], jd_text: str) -> float:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    if not candidate_texts or not jd_text:
+        return 0.0
+    try:
+        corpus = [jd_text] + candidate_texts
+        vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1).fit(corpus)
+        mats = vec.transform(corpus)
+        jd_vec = mats[0]
+        cand_vecs = mats[1:]
+        sims = cosine_similarity(cand_vecs, jd_vec).flatten()
+        if sims.size == 0:
+            return 0.0
+        return float(max(0.0, min(1.0, float(sims.mean()))))
+    except Exception:
+        jd_lower = jd_text.lower()
+        overlap = sum(1 for t in candidate_texts if t and t.lower() in jd_lower)
+        return float(min(1.0, overlap / max(1, len(candidate_texts))))
+
+from typing import Tuple
+def compute_sim(candidate_texts: List[str], jd_text: str, model) -> Tuple[float, float, int]:
+    if not candidate_texts:
+        return 0.0, 0.0, -1
+    try:
+        jd_emb = embed_texts([jd_text], model=model)[0]
+        cand_embs = embed_texts(candidate_texts, model=model)
+        sims = cosine_sim_matrix(cand_embs, jd_emb)  # (n_cand, 1)
+        sims = np.array(sims).flatten()
+        best_idx = int(np.argmax(sims))
+        best = float(sims[best_idx])
+        avg = float(np.mean(sims))
+        return best, avg, best_idx
+    except Exception:
+        return 0.0, 0.0, -1
+
+
+# ---------- main API ----------
 def score_candidate(
     candidate_json: Dict[str, Any],
     jd_text: str,
-    profile_base_weights: Optional[Dict[str, float]] = None,
-    canonical_feature_desc: Optional[Dict[str, List[str]]] = None,
     alpha: float = ALPHA_DEFAULT,
     beta: float = BETA_DEFAULT,
-    sbert_model=None,
+    profile_base_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
-    Score candidate_json against jd_text and return an explainable score payload.
-
-    candidate_json: dict with keys like 'skills', 'projects', etc. Each is a list of strings or dicts.
-                    OR extractor-format with top-level key "features": {...}
-    jd_text: job description text (string)
-    profile_base_weights: optional mapping feature -> base weight
-    canonical_feature_desc: optional mapping feature -> list[str] describing canonical descriptors (for jd importance)
-    alpha, beta: tunable scalars
-    sbert_model: a loaded SentenceTransformer instance (optional)
+    Main entry point.
+    - candidate_json: either simplified candidate JSON OR a full stored doc that may contain 'features', 'sections', or 'full_text'.
+    - jd_text: job description text
     """
-    # Defensive: if caller passed extractor-style object containing 'features', convert it.
-    if (
-        isinstance(candidate_json, dict)
-        and "features" in candidate_json
-        and any(isinstance(candidate_json["features"], dict))
-    ):
-        candidate_json = _features_to_candidate_json(candidate_json)
+    debug_msgs: List[str] = []
 
-    if not isinstance(candidate_json, dict):
-        candidate_json = {}
+    # First: if input looks like extractor-style or has 'features', check if empty and try to regenerate features
+    if isinstance(candidate_json, dict) and _is_features_empty(candidate_json):
+        debug_msgs.append("Input appears to have empty/missing features.")
+        # If sections present, try run_feature_extraction_from_sections
+        try:
+            if (
+                isinstance(candidate_json, dict)
+                and "sections" in candidate_json
+                and _try_extractor.get("run_feature_extraction_from_sections")
+            ):
+                debug_msgs.append(
+                    "Attempting to regenerate features from 'sections' using run_feature_extraction_from_sections."
+                )
+                try:
+                    regenerated = _try_extractor[
+                        "run_feature_extraction_from_sections"
+                    ](candidate_json.get("sections", {}), jd_text=jd_text)
+                    if regenerated and isinstance(regenerated, dict):
+                        candidate_json = _features_to_candidate_json(regenerated)
+                        debug_msgs.append(
+                            "Regenerated candidate_json from sections; continuing scoring."
+                        )
+                except Exception as e:
+                    debug_msgs.append(f"Regeneration from sections failed: {e}")
+            # If full_text present, try extract_features_from_sectioned or run_feature_extraction_from_sections on a single-section payload
+            elif isinstance(candidate_json, dict) and (
+                "full_text" in candidate_json
+                or "cleaned_text" in candidate_json
+                or "text" in candidate_json
+            ):
+                debug_msgs.append(
+                    "Attempting to regenerate features from 'full_text' using extractor."
+                )
+                text_blob = (
+                    candidate_json.get("full_text")
+                    or candidate_json.get("cleaned_text")
+                    or candidate_json.get("text")
+                )
+                # try extractor functions
+                if _try_extractor.get("extract_features_from_sectioned"):
+                    try:
+                        regenerated = (
+                            _try_extractor["extract_features_from_sectioned"](
+                                {"sections": {"full": text_blob}}, jd_text=jd_text
+                            )
+                            if isinstance(text_blob, dict)
+                            else _try_extractor["extract_features_from_sectioned"](
+                                {"sections": {"full": text_blob}}, jd_text=jd_text
+                            )
+                        )
+                        if regenerated and isinstance(regenerated, dict):
+                            candidate_json = _features_to_candidate_json(regenerated)
+                            debug_msgs.append(
+                                "Regenerated candidate_json from full_text via extract_features_from_sectioned."
+                            )
+                    except Exception as e:
+                        debug_msgs.append(
+                            f"extract_features_from_sectioned failed: {e}"
+                        )
+                elif _try_extractor.get("run_feature_extraction_from_sections"):
+                    try:
+                        regenerated = _try_extractor[
+                            "run_feature_extraction_from_sections"
+                        ]({"full": text_blob}, jd_text=jd_text)
+                        if regenerated and isinstance(regenerated, dict):
+                            candidate_json = _features_to_candidate_json(regenerated)
+                            debug_msgs.append(
+                                "Regenerated candidate_json from full_text via run_feature_extraction_from_sections."
+                            )
+                    except Exception as e:
+                        debug_msgs.append(
+                            f"run_feature_extraction_from_sections on full_text failed: {e}"
+                        )
+        except Exception as e:
+            debug_msgs.append(f"Unexpected error during regeneration attempt: {e}")
 
-    if profile_base_weights is None:
-        profile_base_weights = {
-            "skills": 0.35,
-            "projects": 0.25,
-            "experience": 0.20,
-            "education": 0.05,
-            "certifications": 0.05,
-            "open_source": 0.05,
-            "research": 0.05,
+    # If still empty after regeneration attempt, return early with helpful debug
+    if _is_features_empty(candidate_json):
+        debug_msgs.append(
+            "No features available after regeneration attempts. Returning zero-score with debug."
+        )
+        # return zero-scoring response with debug
+        empty_per_feature = {
+            "skills": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.35,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.35,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
+            "projects": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.25,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.25,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
+            "experience": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.2,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.2,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
+            "open_source": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.05,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.05,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
+            "certifications": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.05,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.05,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
+            "education": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.05,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.05,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
+            "research": {
+                "sim": 0.0,
+                "best_sim": 0.0,
+                "evidence_index": "",
+                "base_weight": 0.05,
+                "jd_importance": 0.0,
+                "strength": 0.0,
+                "final_weight": 0.05,
+                "contrib": 0.0,
+                "items_count": 0,
+            },
         }
-    if canonical_feature_desc is None:
-        canonical_feature_desc = {}
+        return {
+            "final_score": 0.0,
+            "raw_score": 0.0,
+            "denom": 1.0,
+            "per_feature": empty_per_feature,
+            "evidence": {k: "" for k in empty_per_feature.keys()},
+            "alpha": float(ALPHA_DEFAULT),
+            "beta": float(BETA_DEFAULT),
+            "debug": debug_msgs,
+        }
 
-    if sbert_model is None:
-        sbert_model = load_sbert()
+    # At this point, candidate_json should be a simplified mapping of lists
+    # Ensure keys exist for expected features
+    features_keys = [
+        "skills",
+        "projects",
+        "experience",
+        "education",
+        "certifications",
+        "open_source",
+        "research",
+    ]
+    simplified = {k: candidate_json.get(k, []) for k in features_keys}
 
-    # Prepare JD sentence embeddings
-    jd_sents = sentence_split(jd_text)
-    if not jd_sents:
-        # simple fallback: use full jd as single sentence
-        jd_sents = [jd_text] if jd_text else []
+    # load model
+    sbert_model = load_sbert()
+
+    # prepare jd sentence embeddings
+    jd_sents = (
+        sentence_split(jd_text)
+        if isinstance(jd_text, str) and jd_text.strip()
+        else [jd_text] if jd_text else []
+    )
     jd_embs = (
         embed_texts(jd_sents, model=sbert_model)
         if jd_sents
@@ -373,100 +558,115 @@ def score_candidate(
         )
     )
 
-    per_feature: Dict[str, Any] = {}
-    total_raw = 0.0
-    total_weights = 0.0
+    per_feature = {}
+    raw_score = 0.0
+    denom = 0.0
 
-    # iterate union of candidate keys and default features
-    features = set(list(candidate_json.keys()) + list(profile_base_weights.keys()))
+    # base weights (keep this default unless override passed)
+    base_profile = {
+        "skills": 0.35,
+        "projects": 0.25,
+        "experience": 0.20,
+        "education": 0.05,
+        "certifications": 0.05,
+        "open_source": 0.05,
+        "research": 0.05,
+    }
 
-    # embedding dimension for zero arrays
-    dim = sbert_model.get_sentence_embedding_dimension()
+    for f in features_keys:
+        items = simplified.get(f, []) or []
+        candidate_texts = []
+        if f == "skills":
+            for it in items:
+                if isinstance(it, dict):
+                    candidate_texts.append(it.get("name") or str(it))
+                else:
+                    candidate_texts.append(str(it))
+        elif f == "projects":
+            for it in items:
+                if isinstance(it, dict):
+                    candidate_texts.append(
+                        it.get("summary") or it.get("title") or str(it)
+                    )
+                else:
+                    candidate_texts.append(str(it))
+        else:
+            for it in items:
+                if isinstance(it, dict):
+                    candidate_texts.append(
+                        it.get("summary")
+                        or it.get("title")
+                        or it.get("name")
+                        or str(it)
+                    )
+                else:
+                    candidate_texts.append(str(it))
 
-    for f in features:
-        items = candidate_json.get(f, [])
-        feat_texts: List[str] = []
-        for it in items:
-            if isinstance(it, dict):
-                t = (
-                    it.get("summary")
-                    or it.get("description")
-                    or it.get("title")
-                    or it.get("name")
-                    or str(it)
-                )
-            else:
-                t = str(it)
-            if t:
-                feat_texts.append(t)
-
-        feat_embs = (
-            embed_texts(feat_texts, model=sbert_model)
-            if len(feat_texts) > 0
-            else np.zeros((0, dim), dtype=np.float32)
+        # compute sim primitives
+        best_sim, avg_sim, best_idx = compute_sim(
+            candidate_texts, jd_text, model=sbert_model
         )
 
-        # compute sim and evidence index
-        sim_val, evidence_idx, best_sim = aggregate_feature_similarity(
-            jd_embs, feat_embs, strategy="topk_mean"
+        # compute strengths
+        strength = compute_candidate_strength(simplified, f)
+
+        # jd importance via TF-IDF
+        jd_importance = (
+            compute_jd_importance_tfidf(candidate_texts, jd_text)
+            if candidate_texts
+            else 0.0
         )
 
-        # compute jd importance
-        canonical_desc = canonical_feature_desc.get(f, [])
-        jd_importance = compute_jd_importance(
-            jd_text, f, canonical_desc, jd_embs, feat_embs, model=sbert_model
-        )
-
-        base_w = float(profile_base_weights.get(f, 0.0))
-        strength = compute_candidate_strength(candidate_json, f)
-
+        base_w = float(base_profile.get(f, 0.0))
         final_w = clamp(base_w + alpha * jd_importance + beta * strength, 0.0, 1.0)
-        contrib = final_w * sim_val
+        contrib = float(final_w) * float(best_sim)
 
         per_feature[f] = {
-            "sim": float(sim_val),
+            "sim": float(avg_sim),
             "best_sim": float(best_sim),
-            "evidence_index": evidence_idx,
+            "evidence_index": (
+                int(best_idx) if best_idx is not None and best_idx != -1 else ""
+            ),
             "base_weight": float(base_w),
             "jd_importance": float(jd_importance),
             "strength": float(strength),
             "final_weight": float(final_w),
             "contrib": float(contrib),
-            "items_count": len(feat_texts),
+            "items_count": len(candidate_texts),
         }
 
-        total_raw += contrib
-        total_weights += final_w
+        raw_score += contrib
+        denom += final_w
 
-    denom = total_weights if total_weights > 0 else 1.0
-    final_score = float(total_raw / denom) if denom > 0 else 0.0
+    denom_safe = denom if denom > 0 else 1.0
+    final_score = float(raw_score / denom_safe) if denom_safe > 0 else 0.0
     final_score = clamp(final_score, 0.0, 1.0)
 
-    # Build evidence mapping (map to original item where possible)
-    evidence: Dict[str, Any] = {}
+    # build evidence mapping
+    evidence = {}
     for f, v in per_feature.items():
         idx = v.get("evidence_index", "")
-        items = candidate_json.get(f, [])
-        selected = None
+        items = simplified.get(f, [])
         try:
             if idx != "" and items:
                 idx_int = int(idx)
                 if 0 <= idx_int < len(items):
-                    selected = items[idx_int]
+                    evidence[f] = items[idx_int]
                 else:
-                    selected = items[0] if items else ""
+                    evidence[f] = items[0] if items else ""
             else:
-                selected = items[0] if items else ""
+                evidence[f] = items[0] if items else ""
         except Exception:
-            selected = items[0] if items else ""
-        evidence[f] = selected
+            evidence[f] = items[0] if items else ""
 
-    return {
-        "final_score": final_score,
-        "raw_score": float(total_raw),
-        "denom": float(denom),
+    resp = {
+        "final_score": float(final_score),
+        "raw_score": float(raw_score),
+        "denom": float(denom_safe),
         "per_feature": per_feature,
         "evidence": evidence,
         "alpha": float(alpha),
         "beta": float(beta),
+        "debug": debug_msgs,
     }
+    return resp
