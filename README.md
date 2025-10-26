@@ -1,4 +1,3 @@
-// ...existing code...
 # HireSense — AI-Powered Resume Screening
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
