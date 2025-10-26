@@ -1,7 +1,8 @@
 # src/pages/recruiter.py
 """
-Recruiter dashboard page extracted from the large file.
-This keeps the same flow: 4 steps (JD -> Upload -> Get Top-K -> Summary).
+Recruiter dashboard page — patched to keep a frontend-only mapping (Streamlit session_state)
+between doc_id and filename/final_score returned by the upload endpoint. This avoids any server DB.
+See: session_state["last_upload_mapping"] which stores { doc_id: {"filename":..., "final_score":...} }
 """
 
 from src.ui.context import st, safe_rerun, get_auth_headers, json
@@ -15,6 +16,22 @@ from src.api.ui_integration.resume_api import (
 from src.ui.score_renderer import render_score
 import uuid
 import pandas as pd
+import traceback
+
+# Ensure session state keys used by this page exist
+if "recruiter_step" not in st.session_state:
+    st.session_state["recruiter_step"] = 1
+if "last_upload_response" not in st.session_state:
+    st.session_state["last_upload_response"] = None
+if "last_upload_mapping" not in st.session_state:
+    st.session_state["last_upload_mapping"] = {}
+# Keep old compatibility keys too
+if "last_batch_upload_response" not in st.session_state:
+    st.session_state["last_batch_upload_response"] = None
+if "last_doc_ids" not in st.session_state:
+    st.session_state["last_doc_ids"] = []
+if "last_batch_id" not in st.session_state:
+    st.session_state["last_batch_id"] = None
 
 
 def recruiter_dashboard():
@@ -28,14 +45,16 @@ def recruiter_dashboard():
         st.info("You are not logged in. Please login via the Login page.")
         return
 
-    # Initialize step state
-    if "recruiter_step" not in st.session_state:
-        st.session_state["recruiter_step"] = 1
     step = st.session_state["recruiter_step"]
 
     def go_to_step(n):
         st.session_state["recruiter_step"] = n
-        safe_rerun()
+        # CHANGED: use safe_rerun provided by your context (version-compatible)
+        try:
+            safe_rerun()
+        except Exception:
+            # safe fallback: write a small message (should rarely be needed)
+            st.warning("Navigation requested; please interact to refresh the UI.")
 
     # ----------------- STEP 1 -----------------
     if step == 1:
@@ -94,47 +113,62 @@ def recruiter_dashboard():
             go_to_step(1)
             return
 
-        if b2.button("Process Batch (upload files[] + JD)"):
-            if not uploaded or len(uploaded) == 0:
-                st.warning("Please select at least one PDF file to upload.")
+        # Upload & process button (robust — do NOT return after safe_rerun)
+        if b2.button("Upload & Process (call /resume/score_batch/upload)"):
+            if not uploaded:
+                st.warning("Please select one or more PDF files to upload.")
             else:
-                jd = st.session_state.get("jd_text", "")
-                if not jd.strip():
-                    st.warning(
-                        "Job Description missing — please go back to Step 1 and enter it."
-                    )
-                else:
-                    files_payload = []
-                    for f in uploaded:
-                        content = f.getvalue()
-                        files_payload.append(
-                            ("files", (f.name, content, "application/pdf"))
-                        )
-                    data = {
-                        "job_description": jd,
-                        "top_k": str(st.session_state.get("top_k", 5)),
-                        "role": st.session_state.get("role", "developer"),
-                    }
-                    if st.session_state.get("required_keywords"):
-                        rk_val = st.session_state.get("required_keywords")
-                        if isinstance(rk_val, list):
-                            data["required_keywords"] = ", ".join([str(x).strip() for x in rk_val if x and str(x).strip() != ""])
-                        else:
-                            data["required_keywords"] = str(rk_val)
+                files_payload = []
+                for f in uploaded:
                     try:
-                        with st.spinner("Uploading batch to resume service..."):
-                            j = api_score_batch_upload(files_payload, data)
-                        # normalize response
-                        results = (
-                            j.get("results")
-                            or j.get("documents")
-                            or j.get("doc_ids")
-                            or j.get("ids")
-                            or []
-                        )
-                        doc_ids = []
-                        if isinstance(results, list):
-                            for item in results:
+                        content = f.read()
+                    except Exception:
+                        f.seek(0)
+                        content = f.read()
+                    files_payload.append(
+                        ("files", (f.name, content, "application/pdf"))
+                    )
+
+                data = {
+                    "job_description": st.session_state.get("jd_text", ""),
+                    "required_keywords": ",".join(
+                        st.session_state.get("required_keywords", [])
+                    ),
+                    "top_k": str(st.session_state.get("top_k", 5)),
+                }
+
+                with st.spinner("Uploading and processing files..."):
+                    try:
+                        upload_resp = api_score_batch_upload(files_payload, data)
+
+                        # Normalize response (requests.Response -> dict)
+                        if hasattr(upload_resp, "json") and not isinstance(
+                            upload_resp, dict
+                        ):
+                            try:
+                                upload_resp = upload_resp.json()
+                            except Exception:
+                                try:
+                                    upload_resp = json.loads(upload_resp.text)
+                                except Exception:
+                                    raise RuntimeError(
+                                        "Upload endpoint returned non-json response"
+                                    )
+
+                        # Persist session keys (both new + legacy keys)
+                        st.session_state["last_upload_response"] = upload_resp
+                        st.session_state["last_batch_upload_response"] = upload_resp
+
+                        # Extract doc_ids robustly
+                        doc_ids = upload_resp.get("doc_ids") or []
+                        if not doc_ids:
+                            results_obj = (
+                                upload_resp.get("results")
+                                or upload_resp.get("files")
+                                or upload_resp.get("documents")
+                                or []
+                            )
+                            for item in results_obj:
                                 if isinstance(item, dict):
                                     did = (
                                         item.get("doc_id")
@@ -145,32 +179,85 @@ def recruiter_dashboard():
                                         doc_ids.append(str(did))
                                 else:
                                     doc_ids.append(str(item))
-                        batch_id = (
-                            j.get("batch_id")
-                            or j.get("id")
-                            or (j.get("data") and j["data"].get("batch_id"))
-                            or str(uuid.uuid4())[:8]
-                        )
-                        st.session_state["last_batch_upload_response"] = j
-                        st.session_state["last_batch_id"] = batch_id
                         st.session_state["last_doc_ids"] = doc_ids
-                        st.success("Batch uploaded / processed on server.")
-                        st.write("Batch ID:", batch_id)
-                        st.write("Returned doc_ids count:", len(doc_ids))
-                    except Exception as e:
-                        st.error(f"Batch upload failed: {e}")
-                        st.info(
-                            "If you see a 422 Unprocessable Entity, ensure the server expects 'files' fields and 'job_description' in form-data."
+
+                        # store batch id (if provided)
+                        st.session_state["last_batch_id"] = (
+                            upload_resp.get("batch_id")
+                            or upload_resp.get("id")
+                            or st.session_state.get("last_batch_id")
                         )
 
-        if st.session_state.get("last_doc_ids"):
-            if st.button("Proceed → Step 3: Get Top-K"):
+                        # Build mapping for UI
+                        mapping = st.session_state.get("last_upload_mapping", {}) or {}
+                        try:
+                            file_list = (
+                                upload_resp.get("results")
+                                or upload_resp.get("files")
+                                or []
+                            )
+                            for item in file_list:
+                                if not isinstance(item, dict):
+                                    continue
+                                did = (
+                                    item.get("doc_id")
+                                    or item.get("docid")
+                                    or item.get("id")
+                                )
+                                fname = item.get("filename") or item.get("file_name")
+                                final_score = item.get("final_score")
+                                if did:
+                                    mapping[did] = {
+                                        "filename": fname,
+                                        "final_score": final_score,
+                                    }
+                            st.session_state["last_upload_mapping"] = mapping
+                        except Exception as map_exc:
+                            st.warning(f"Warning: mapping build failed: {map_exc}")
+
+                        st.success("Upload + processing completed.")
+                        st.write("Batch ID:", st.session_state.get("last_batch_id"))
+                        st.write(
+                            "Returned doc_ids count:",
+                            len(st.session_state.get("last_doc_ids", [])),
+                        )
+
+                        # Attempt to rerun the app to immediately reflect navigation
+                        try:
+                            safe_rerun()
+                            # DO NOT return here — if safe_rerun is a no-op, we still want to continue
+                        except Exception:
+                            # safe_rerun should not crash; ignore
+                            pass
+
+                    except Exception as e:
+                        import traceback
+
+                        tb = traceback.format_exc()
+                        st.exception(f"Upload failed: {e}")
+                        st.text(tb)
+
+        # Keep old gating: enable Proceed → Step 3 if last_doc_ids present
+        if st.button("Proceed → Step 3: Get Top-K"):
+            doc_ids = st.session_state.get("last_doc_ids") or []
+            # debug help: print count to UI (you can remove in prod)
+            try:
+                st.write(f"Debug: last_doc_ids count = {len(doc_ids)}")
+            except Exception:
+                pass
+
+            if not doc_ids:
+                st.warning(
+                    "No doc_ids found from last upload — please upload resumes first or press 'Upload & Process' again."
+                )
+            else:
                 go_to_step(3)
                 return
-        else:
-            st.caption(
-                "After a successful batch upload you can click 'Proceed → Step 3' (enabled when doc_ids are available)."
-            )
+
+        # Friendly caption (keeps the UX hint visible)
+        st.caption(
+            "Tip: After upload finishes the app populates doc_ids automatically. If you do not see results, try clicking this button to proceed."
+        )
 
         if b3.button("Process Single (use process_resume endpoint)"):
             if not uploaded or len(uploaded) == 0:
@@ -180,9 +267,7 @@ def recruiter_dashboard():
                 try:
                     with st.spinner("Processing resume (single) on server..."):
                         resp = api_process_resume(
-                            sel.getvalue(),
-                            sel.name,
-                            metadata={"source": "recruiter_ui"},
+                            sel.read(), sel.name, metadata={"source": "recruiter_ui"}
                         )
                     candidate = resp.get("candidate") or resp
                     st.session_state["last_candidate"] = candidate
@@ -246,6 +331,7 @@ def recruiter_dashboard():
                     if not isinstance(results, list):
                         results = []
                     rows = []
+                    mapping = st.session_state.get("last_upload_mapping", {}) or {}
                     for r in results:
                         if not isinstance(r, dict):
                             continue
@@ -256,18 +342,29 @@ def recruiter_dashboard():
                             or r.get("document_id")
                             or "unknown-id"
                         )
+                        # use mapping filename if available
+                        fname = (
+                            mapping.get(cid, {}).get("filename")
+                            if mapping.get(cid)
+                            else (r.get("file_name") or r.get("filename"))
+                        )
                         score_val = (
-                            r.get("final_score")
-                            or r.get("score")
-                            or r.get("combined_score")
-                            or 0.0
+                            mapping.get(cid, {}).get("final_score")
+                            if mapping.get(cid)
+                            and mapping.get(cid).get("final_score") is not None
+                            else (r.get("final_score") or r.get("score") or 0.0)
                         )
                         try:
                             score_val = float(score_val)
                         except Exception:
-                            score_val = 0.0
+                            pass
                         rows.append(
-                            {"candidate_id": str(cid), "score": score_val, "raw": r}
+                            {
+                                "candidate_id": str(cid),
+                                "score": score_val,
+                                "file_name": fname,
+                                "raw": r,
+                            }
                         )
                     if len(rows) == 0:
                         st.warning(
@@ -277,13 +374,19 @@ def recruiter_dashboard():
                         st.session_state["last_batch_scores"] = j
                     else:
                         rows_sorted = sorted(
-                            rows, key=lambda x: x["score"], reverse=True
+                            rows,
+                            key=lambda x: (x["score"] is not None, x["score"]),
+                            reverse=True,
                         )
                         k = st.session_state.get("top_k", 5)
                         top_rows = rows_sorted[:k]
                         df = pd.DataFrame(
                             [
-                                {"candidate_id": r["candidate_id"], "score": r["score"]}
+                                {
+                                    "candidate_id": r["candidate_id"],
+                                    "file_name": r.get("file_name"),
+                                    "score": r["score"],
+                                }
                                 for r in top_rows
                             ]
                         ).set_index("candidate_id")
@@ -292,7 +395,8 @@ def recruiter_dashboard():
                         )
                         st.table(df)
                         labels = [
-                            f"{r['candidate_id']} — {r['score']:.4f}" for r in top_rows
+                            f"{(r.get('file_name') or 'unknown')} — {r['candidate_id']} — {r['score']}"
+                            for r in top_rows
                         ]
                         idx = st.selectbox(
                             "Select candidate to view details",
@@ -302,7 +406,8 @@ def recruiter_dashboard():
                         chosen = top_rows[idx]
                         st.markdown("#### Details for selected candidate")
                         st.write("**Candidate (doc_id)**:", chosen["candidate_id"])
-                        st.write("**Final score**:", f"{chosen['score']:.4f}")
+                        st.write("**Final score**:", round(chosen["score"], 4))
+                        st.write("**File name**:", chosen.get("file_name") or "—")
                         with st.expander("Show raw candidate payload"):
                             st.json(chosen["raw"])
                         nested_score = (
@@ -374,6 +479,7 @@ def recruiter_dashboard():
         st.write(
             "Summary of processed resumes from your last batch operation. This Step uses the stored batch results (from Step 3) for totals and downloads. The UI no longer depends on a /resume/list_docs endpoint."
         )
+
         a1, a2 = st.columns([1, 1])
         if a1.button("⬅ Back to Step 3"):
             go_to_step(3)
@@ -382,12 +488,15 @@ def recruiter_dashboard():
             st.info(
                 "This loads the last batch results saved during your session (from Step 3). If you need a server-wide listing, add a /resume/list_docs endpoint to the backend."
             )
+
         last_batch_scores = st.session_state.get("last_batch_scores")
         last_batch_upload_resp = st.session_state.get("last_batch_upload_response")
         last_doc_ids = st.session_state.get("last_doc_ids") or []
+
         if last_batch_upload_resp:
             st.subheader("Upload response (raw)")
             st.json(last_batch_upload_resp)
+
         if last_batch_scores:
             total_processed_val = (
                 last_batch_scores.get("count")
@@ -428,6 +537,7 @@ def recruiter_dashboard():
             st.info(
                 "No batch scoring results found in session. Run Step 3 to obtain Top-K results first."
             )
+
         server_docs = st.session_state.get("server_docs") or []
         if server_docs:
             st.subheader("Server documents (session cache preview)")
@@ -440,6 +550,7 @@ def recruiter_dashboard():
             st.caption(
                 "Server document listing is not available in session. To enable a full server-side listing, implement GET /resume/list_docs on the backend and re-enable the UI call."
             )
+
         if st.button("Start a new job (clear and go to Step 1)"):
             keys_to_clear = [
                 "last_batch_upload_response",
@@ -449,6 +560,8 @@ def recruiter_dashboard():
                 "last_score",
                 "last_candidate",
                 "server_docs",
+                "last_upload_response",
+                "last_upload_mapping",
             ]
             for k in keys_to_clear:
                 if k in st.session_state:
@@ -456,3 +569,9 @@ def recruiter_dashboard():
             st.session_state["recruiter_step"] = 1
             go_to_step(1)
             return
+
+    # Render top-right user info (unchanged)
+    try:
+        render_top_right_user()
+    except Exception:
+        pass
