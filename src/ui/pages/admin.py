@@ -129,13 +129,16 @@ def _render_paginated_table(
                             ok = components.toggle_user_active(
                                 int(raw_id), make_active=False
                             )
-                        except Exception:
+                        except Exception as e:
                             ok = False
+                            st.error(f"Request failed: {e}")
                         if ok:
                             st.success("User deactivated.")
                             safe_rerun()
                         else:
-                            st.error("Failed to deactivate user.")
+                            st.error(
+                                "Failed to deactivate user. Check browser console / server logs for details."
+                            )
                 else:
                     btn_key = f"act_{row_id_str}_{page_key}"
                     if st.button("Activate", key=btn_key):

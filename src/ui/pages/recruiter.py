@@ -49,7 +49,7 @@ def recruiter_dashboard():
 
     def go_to_step(n):
         st.session_state["recruiter_step"] = n
-        # CHANGED: use safe_rerun provided by your context (version-compatible)
+        # CHANGED: use safe_rerun provided by context (version-compatible)
         try:
             safe_rerun()
         except Exception:
@@ -477,7 +477,7 @@ def recruiter_dashboard():
     elif step == 4:
         st.header("Step 4 — Server Docs & Summary")
         st.write(
-            "Summary of processed resumes from your last batch operation. This Step uses the stored batch results (from Step 3) for totals and downloads. The UI no longer depends on a /resume/list_docs endpoint."
+            "Summary of processed resumes from last batch operation. This Step uses the stored batch results (from Step 3) for totals and downloads. The UI no longer depends on a /resume/list_docs endpoint."
         )
 
         a1, a2 = st.columns([1, 1])
@@ -486,7 +486,7 @@ def recruiter_dashboard():
             return
         if a2.button("Load last batch summary (from session)"):
             st.info(
-                "This loads the last batch results saved during your session (from Step 3). If you need a server-wide listing, add a /resume/list_docs endpoint to the backend."
+                "This loads the last batch results saved during session (from Step 3). If you need a server-wide listing, add a /resume/list_docs endpoint to the backend."
             )
 
         last_batch_scores = st.session_state.get("last_batch_scores")

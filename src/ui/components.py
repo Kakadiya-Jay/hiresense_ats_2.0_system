@@ -33,6 +33,32 @@ def _auth_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+def api_signup(payload: dict, timeout: int = 10):
+    """
+    Send recruiter signup payload to backend.
+    Returns (response_json_or_text, status_code)
+    """
+    url = f"{AUTH_API_BASE_URL}/auth/signup"
+    headers = {"Content-Type": "application/json"}
+    # attach auth headers only if present (signup normally unauthenticated)
+    auth = _auth_headers()
+    # _auth_headers may include Content-Type; merge without overwriting
+    headers.update({k: v for k, v in auth.items() if k not in headers})
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    except requests.RequestException as e:
+        # return a simplified error so caller can display it
+        return {"error": f"Network error: {e}"}, 0
+
+    # try to return parsed JSON when possible
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"text": resp.text}
+    return body, resp.status_code
+
+
 # ---------------------------
 # /auth/me helpers
 # ---------------------------
@@ -236,12 +262,15 @@ def toggle_user_active(
     Toggle a user's active status via /admin/users/{id}/status.
     Tries PUT -> PATCH -> POST if necessary.
     Returns True on success.
+    NOTE: backend expects {"active": <bool>} so we send that key.
     """
     url = f"{AUTH_API_BASE_URL}/admin/users/{user_id}/status"
-    payload = {"is_active": bool(make_active)}
+    # <-- send the key expected by FastAPI endpoint
+    payload = {"active": bool(make_active)}
     headers = _auth_headers()
     methods = ["PUT", "PATCH", "POST"]
 
+    # try multiple methods (existing helper)
     resp, used = _try_request_with_fallbacks(
         methods, url, headers=headers, json_body=payload, timeout=timeout
     )
@@ -250,6 +279,12 @@ def toggle_user_active(
             st.error("Network error while updating user status.")
         return False
 
+    # debug: optionally print server response to help during dev
+    try:
+        debug_body = resp.json()
+    except Exception:
+        debug_body = resp.text
+
     if resp.status_code in (200, 201, 202, 204):
         if show_message:
             st.success(
@@ -257,7 +292,6 @@ def toggle_user_active(
             )
         return True
 
-    # if unauthorized -> clear auth and return False
     if resp.status_code in (401, 403):
         if show_message:
             st.error("Unauthorized. Please login again.")
@@ -266,13 +300,11 @@ def toggle_user_active(
                 del st.session_state[k]
         return False
 
-    # otherwise show detailed message
-    try:
-        err = resp.json()
-    except Exception:
-        err = resp.text or f"HTTP {resp.status_code}"
+    # show backend error detail when present
     if show_message:
-        st.error(f"Failed to update user status: {err}")
+        st.error(
+            f"Failed to update user status (HTTP {resp.status_code}): {debug_body}"
+        )
     return False
 
 
@@ -639,3 +671,29 @@ def logout_and_clear():
     st.session_state["page"] = "Login"
     st.session_state["active_page"] = "Login"
     safe_rerun()
+
+
+def api_signup(payload: dict, timeout: int = 10):
+    """
+    Send recruiter signup payload to backend.
+    Returns (response_json_or_text, status_code)
+    """
+    url = f"{AUTH_API_BASE_URL}/auth/signup"
+    headers = {"Content-Type": "application/json"}
+    # attach auth headers only if present (signup normally unauthenticated)
+    auth = _auth_headers()
+    # _auth_headers may include Content-Type; merge without overwriting
+    headers.update({k: v for k, v in auth.items() if k not in headers})
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    except requests.RequestException as e:
+        # return a simplified error so caller can display it
+        return {"error": f"Network error: {e}"}, 0
+
+    # try to return parsed JSON when possible
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"text": resp.text}
+    return body, resp.status_code
