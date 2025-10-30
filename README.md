@@ -99,7 +99,7 @@ Prerequisites:
 
    - Start Streamlit UI
      powershell
-     $ streamlit run e2e_streamlit_app.py
+     $ streamlit run streamlit_app.py
 
 Configuration
 -------------
