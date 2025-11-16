@@ -280,6 +280,7 @@ def recruiter_dashboard():
                     st.error(f"Single resume processing failed: {e}")
 
     # ----------------- STEP 3 -----------------
+    # ----------------- STEP 3 -----------------
     elif step == 3:
         st.header("Step 3 — Get Top-K / Score")
         top_k_current = st.number_input(
@@ -299,148 +300,203 @@ def recruiter_dashboard():
             go_to_step(2)
             return
 
-        if doc_ids:
-            if c2.button("Get Top-K (call /resume/score_batch)"):
-                payload = {
-                    "doc_ids": doc_ids,
-                    "job_description": jd,
-                    "top_k": int(st.session_state.get("top_k", 5)),
-                    "role": st.session_state.get("role", "developer"),
-                }
-                rk = st.session_state.get("required_keywords")
-                if rk:
-                    if isinstance(rk, list):
-                        payload["required_keywords"] = ", ".join(
-                            [
-                                str(x).strip()
-                                for x in rk
-                                if x is not None and str(x).strip() != ""
-                            ]
-                        )
-                    else:
-                        payload["required_keywords"] = str(rk)
-                try:
-                    with st.spinner("Requesting top candidates from server..."):
-                        j = api_score_batch(payload)
-                    results = (
-                        j.get("results")
-                        or j.get("ranked_candidates")
-                        or j.get("candidates")
-                        or []
-                    )
-                    if not isinstance(results, list):
-                        results = []
-                    rows = []
-                    mapping = st.session_state.get("last_upload_mapping", {}) or {}
-                    for r in results:
-                        if not isinstance(r, dict):
-                            continue
-                        cid = (
-                            r.get("candidate_id")
-                            or r.get("doc_id")
-                            or r.get("id")
-                            or r.get("document_id")
-                            or "unknown-id"
-                        )
-                        # use mapping filename if available
-                        fname = (
-                            mapping.get(cid, {}).get("filename")
-                            if mapping.get(cid)
-                            else (r.get("file_name") or r.get("filename"))
-                        )
-                        score_val = (
-                            mapping.get(cid, {}).get("final_score")
-                            if mapping.get(cid)
-                            and mapping.get(cid).get("final_score") is not None
-                            else (r.get("final_score") or r.get("score") or 0.0)
-                        )
-                        try:
-                            score_val = float(score_val)
-                        except Exception:
-                            pass
-                        rows.append(
-                            {
-                                "candidate_id": str(cid),
-                                "score": score_val,
-                                "file_name": fname,
-                                "raw": r,
-                            }
-                        )
-                    if len(rows) == 0:
-                        st.warning(
-                            "No scoring results returned by server. See raw response for debugging."
-                        )
-                        st.json(j)
-                        st.session_state["last_batch_scores"] = j
-                    else:
-                        rows_sorted = sorted(
-                            rows,
-                            key=lambda x: (x["score"] is not None, x["score"]),
-                            reverse=True,
-                        )
-                        k = st.session_state.get("top_k", 5)
-                        top_rows = rows_sorted[:k]
-                        df = pd.DataFrame(
-                            [
-                                {
-                                    "candidate_id": r["candidate_id"],
-                                    "file_name": r.get("file_name"),
-                                    "score": r["score"],
-                                }
-                                for r in top_rows
-                            ]
-                        ).set_index("candidate_id")
-                        st.subheader(
-                            f"Top {min(k, len(top_rows))} candidates (server ranking)"
-                        )
-                        st.table(df)
-                        labels = [
-                            f"{(r.get('file_name') or 'unknown')} — {r['candidate_id']} — {r['score']}"
-                            for r in top_rows
+        # Try to reuse cached scores if present
+        cached_scores = st.session_state.get("last_batch_scores")
+        scores_payload = None
+        used_cached = False
+        if cached_scores:
+            scores_payload = cached_scores
+            used_cached = True
+
+        # If user asks for new Top-K, fetch and overwrite cache
+        if c2.button("Get Top-K (call /resume/score_batch)"):
+            payload = {
+                "doc_ids": doc_ids,
+                "job_description": jd,
+                "top_k": int(st.session_state.get("top_k", 5)),
+                "role": st.session_state.get("role", "developer"),
+            }
+            rk = st.session_state.get("required_keywords")
+            if rk:
+                if isinstance(rk, list):
+                    payload["required_keywords"] = ", ".join(
+                        [
+                            str(x).strip()
+                            for x in rk
+                            if x is not None and str(x).strip() != ""
                         ]
-                        idx = st.selectbox(
-                            "Select candidate to view details",
-                            options=list(range(len(labels))),
-                            format_func=lambda i: labels[i],
-                        )
-                        chosen = top_rows[idx]
-                        st.markdown("#### Details for selected candidate")
-                        st.write("**Candidate (doc_id)**:", chosen["candidate_id"])
-                        st.write("**Final score**:", round(chosen["score"], 4))
-                        st.write("**File name**:", chosen.get("file_name") or "—")
-                        with st.expander("Show raw candidate payload"):
-                            st.json(chosen["raw"])
-                        nested_score = (
-                            chosen["raw"].get("score_result")
-                            or chosen["raw"].get("score")
-                            or chosen["raw"].get("score_obj")
-                            or chosen["raw"]
-                        )
-                        try:
-                            render_score(
-                                nested_score, top_k=st.session_state.get("top_k", 5)
-                            )
-                        except Exception:
-                            st.info(
-                                "Per-feature explanation not available or failed to render for this candidate."
-                            )
-                        st.session_state["last_batch_scores"] = j
-                    total_processed = None
-                    if isinstance(j.get("count"), (int, float)):
-                        total_processed = int(j.get("count"))
-                    elif isinstance(j.get("count"), str) and j.get("count").isdigit():
-                        total_processed = int(j.get("count"))
-                    else:
-                        total_processed = len(results)
-                    st.info(
-                        f"Total processed: {total_processed} | Top-K shown: {min(st.session_state.get('top_k',5), len(results))}"
                     )
-                except Exception as e:
-                    st.error(f"Batch scoring request failed: {e}")
-                    st.info(
-                        "If server returns 422, confirm payload contains doc_ids (array), job_description (string), and top_k (int)."
+                else:
+                    payload["required_keywords"] = str(rk)
+            try:
+                with st.spinner("Requesting top candidates from server..."):
+                    j = api_score_batch(payload)
+                # cache for re-runs / select changes
+                st.session_state["last_batch_scores"] = j
+                scores_payload = j
+                used_cached = True
+            except Exception as e:
+                st.error(f"Batch scoring request failed: {e}")
+                st.info(
+                    "If server returns 422, confirm payload contains doc_ids (array), job_description (string), and top_k (int)."
+                )
+                scores_payload = None
+                used_cached = False
+
+        # If we have scores from either cache or fresh request, build UI
+        if scores_payload and used_cached:
+            results = (
+                scores_payload.get("results")
+                or scores_payload.get("ranked_candidates")
+                or scores_payload.get("candidates")
+                or []
+            )
+            if not isinstance(results, list):
+                results = []
+
+            # Build rows using mapping if present
+            rows = []
+            mapping = st.session_state.get("last_upload_mapping", {}) or {}
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                cid = (
+                    r.get("candidate_id")
+                    or r.get("doc_id")
+                    or r.get("id")
+                    or r.get("document_id")
+                    or "unknown-id"
+                )
+                fname = (
+                    mapping.get(cid, {}).get("filename")
+                    if mapping.get(cid)
+                    else (r.get("file_name") or r.get("filename"))
+                )
+                score_val = (
+                    mapping.get(cid, {}).get("final_score")
+                    if mapping.get(cid)
+                    and mapping.get(cid).get("final_score") is not None
+                    else (r.get("final_score") or r.get("score") or 0.0)
+                )
+                try:
+                    score_val = float(score_val)
+                except Exception:
+                    pass
+                rows.append(
+                    {
+                        "candidate_id": str(cid),
+                        "score": score_val,
+                        "file_name": fname,
+                        "raw": r,
+                    }
+                )
+
+            if len(rows) == 0:
+                st.warning(
+                    "No scoring results returned by server. See raw response for debugging."
+                )
+                st.json(scores_payload)
+                st.session_state["last_batch_scores"] = scores_payload
+            else:
+                rows_sorted = sorted(
+                    rows,
+                    key=lambda x: (x["score"] is not None, x["score"]),
+                    reverse=True,
+                )
+                k = st.session_state.get("top_k", 5)
+                top_rows = rows_sorted[:k]
+
+                # Table
+                df = pd.DataFrame(
+                    [
+                        {
+                            "candidate_id": r["candidate_id"],
+                            "file_name": r.get("file_name"),
+                            "score": r["score"],
+                        }
+                        for r in top_rows
+                    ]
+                ).set_index("candidate_id")
+                st.subheader(f"Top {min(k, len(top_rows))} candidates (server ranking)")
+                st.table(df)
+
+                # Labels and persistent selectbox
+                labels = [
+                    f"{(r.get('file_name') or 'unknown')} — {r['candidate_id']} — {r['score']:.4f}"
+                    for r in top_rows
+                ]
+                selection_key = "recruiter_topk_select_idx"
+                default_index = st.session_state.get(selection_key, 0)
+                # use stable key for selectbox so its state is preserved across reruns
+                idx = st.selectbox(
+                    "Select candidate to view details",
+                    options=list(range(len(labels))),
+                    index=default_index,
+                    format_func=lambda i: labels[i],
+                    key="select_candidate_dropdown",
+                )
+                # persist selected index for future reruns
+                st.session_state[selection_key] = idx
+
+                chosen = top_rows[idx]
+                st.markdown("#### Details for selected candidate")
+                st.write("**Candidate (doc_id)**:", chosen["candidate_id"])
+                st.write("**Final score**:", f"{chosen['score']:.4f}")
+                st.write("**File name**:", chosen.get("file_name") or "—")
+
+                # Download CV button (see explanation below for backend hookup)
+                # Example: clickable link to download endpoint (opens new tab)
+                API_BASE = st.session_state.get("api_base_url", "")
+                if API_BASE:
+                    doc_id_for_download = chosen["candidate_id"]
+                    fname_for_download = (
+                        chosen.get("file_name") or f"{doc_id_for_download}.pdf"
                     )
+                    download_url = (
+                        f"{API_BASE.rstrip('/')}/resume/download/{doc_id_for_download}"
+                    )
+                    st.markdown(
+                        f"<a href='{download_url}' target='_blank'><button>Open / Download CV</button></a>",
+                        unsafe_allow_html=True,
+                    )
+
+                with st.expander("Show raw candidate payload"):
+                    st.json(chosen["raw"])
+
+                nested_score = (
+                    chosen["raw"].get("score_result")
+                    or chosen["raw"].get("score")
+                    or chosen["raw"].get("score_obj")
+                    or chosen["raw"]
+                )
+                try:
+                    render_score(nested_score, top_k=st.session_state.get("top_k", 5))
+                except Exception:
+                    st.info(
+                        "Per-feature explanation not available or failed to render for this candidate."
+                    )
+
+                # cache last batch scores (reinforce)
+                st.session_state["last_batch_scores"] = scores_payload
+
+                # Counts: uploaded vs processed/returned by scoring
+                uploaded_count = len(st.session_state.get("last_doc_ids", []))
+                # compute scored_count from payload
+                if isinstance(scores_payload.get("count"), (int, float)):
+                    scored_count = int(scores_payload.get("count"))
+                elif (
+                    isinstance(scores_payload.get("count"), str)
+                    and scores_payload.get("count").isdigit()
+                ):
+                    scored_count = int(scores_payload.get("count"))
+                else:
+                    scored_count = len(results)
+                st.info(
+                    f"Uploaded (sent): {uploaded_count} | Processed/returned by scoring: {scored_count} | Top-K shown: {min(k, len(results))}"
+                )
+
         elif candidate:
+            # Single processed candidate (from Step 2 "Process Single")
             doc_id = (
                 candidate.get("doc_id")
                 or candidate.get("candidate_id")
